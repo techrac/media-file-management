@@ -1,3 +1,64 @@
+# Media File Management Tool
+
+A Python tool for organizing and managing media files (photos and videos) by extracting metadata and performing various organizational tasks.
+
+## Features
+
+- **Rename Media Files**: Automatically rename photos and videos using timestamps extracted from EXIF metadata
+- **Find and Delete Duplicates**: Identify duplicate files using SHA256 checksums and remove them
+- **Flatten Directory Structure**: Move all files from subdirectories to the root folder
+- **Timezone Support**: Handle timezone conversion for files with GPS coordinates or specify a default timezone
+- **Both CLI and GUI**: Available as both command-line tool and graphical user interface
+- **Dry Run Mode**: Preview changes before actually modifying files
+- **Debug Mode**: Verbose output for troubleshooting
+
+## How It Works
+
+The tool reads EXIF metadata from media files to extract creation timestamps. It prioritizes different metadata sources in this order:
+1. EXIF creation date (local time)
+2. QuickTime creation date with timezone info
+3. QuickTime creation date converted from UTC using GPS coordinates
+4. QuickTime creation date converted from UTC using specified timezone
+5. QuickTime creation date (assumed local time)
+
+Files are renamed using the format: `YYYYMMDD_HHMMSS-original_name.extension`
+
+## Usage
+
+### Command Line Interface
+
+```bash
+# Basic usage - rename files with dry run
+python main.py /path/to/photos --rename --dry-run
+
+# Full workflow with all features
+python main.py /path/to/photos --flatten --delete-dups --rename --timezone "Europe/Paris"
+
+# Available options:
+# --rename        Rename media files using metadata timestamps
+# --delete-dups   Find and delete duplicate files
+# --flatten       Move all files to root directory
+# --dry-run       Preview changes without modifying files
+# --debug         Verbose output
+# --timezone      Specify timezone for UTC conversion
+```
+
+### Graphical User Interface
+
+```bash
+python gui.py
+```
+
+The GUI provides a user-friendly interface with:
+- Folder browser
+- Checkboxes for each action
+- Timezone selector
+- Command preview
+- Real-time output console
+- Settings persistence
+
+## Development
+
 # activate the virtual env
 source ./.venv/bin/activate
 
