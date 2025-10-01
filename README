@@ -1,0 +1,11 @@
+# activate the virtual env
+source ./.venv/bin/activate
+
+# run command line version (debug from IDE)
+python main.py
+
+# run GUI version (debug from IDE)
+python gui.py
+
+# package the Mac app (with cx_freeze)
+python setup.py bdist_mac
