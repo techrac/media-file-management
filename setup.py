@@ -27,9 +27,21 @@ try:
         exiftool_path = et.executable
     # The tuple is (source_path, destination_in_bundle)
     exiftool_include = (exiftool_path, os.path.basename(exiftool_path))
+    
+    # Also find the ExifTool Perl libraries directory
+    exiftool_dir = os.path.dirname(exiftool_path)
+    exiftool_lib_path = os.path.join(exiftool_dir, 'lib')
+    if os.path.exists(exiftool_lib_path):
+        # Include the entire lib directory with Perl modules
+        exiftool_lib_include = (exiftool_lib_path, 'lib')
+        print(f"Found ExifTool lib directory: {exiftool_lib_path}")
+    else:
+        print(f"Warning: ExifTool lib directory not found at {exiftool_lib_path}")
+        exiftool_lib_include = None
 except Exception as e:
     print(f"Warning: Could not find the exiftool executable: {e}")
     exiftool_include = None
+    exiftool_lib_include = None
 
 # 2. Find the data files for timezonefinder
 try:
@@ -50,7 +62,7 @@ except Exception as e:
 # --- Build Configuration ---
 
 # Files and directories to include in the build. Filter out any that were not found.
-include_files = [f for f in [exiftool_include, tz_include, tzdata_include] if f is not None]
+include_files = [f for f in [exiftool_include, exiftool_lib_include, tz_include, tzdata_include] if f is not None]
 
 # Packages that cx_Freeze might miss.
 packages = ["tkinter", "numpy", "exiftool", "zoneinfo", "main"]
