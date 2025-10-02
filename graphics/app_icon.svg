@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- Extended background to fill rounded corners -->
+  <rect x="-20" y="-20" width="552" height="552" fill="#4F46E5"/>
+  
+  <!-- Large MT text centered -->
+  <text x="256" y="360" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="280" font-weight="bold" fill="white">MT</text>
+</svg>

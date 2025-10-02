@@ -76,6 +76,7 @@ build_exe_options = {
 # For macOS, we need to specify bdist_mac options to create a proper .app
 bdist_mac_options = {
     "bundle_name": "MediaTool",
+    "iconfile": "graphics/MediaTool.icns",
 }
 
 # Set the base for a GUI application.
