@@ -1,8 +1,5 @@
 import sys
 import os
-import shutil
-import zipfile
-from datetime import datetime
 from cx_Freeze import setup, Executable
 import exiftool  # To find the executable
 
@@ -21,38 +18,6 @@ def get_package_path(package_name):
             f"Could not find the '{package_name}' package. Is it installed?"
         )
 
-def zip_app_bundle(app_path, output_dir="build"):
-    """Create a zip file of the app bundle for distribution."""
-    if not os.path.exists(app_path):
-        print(f"Warning: App bundle not found at {app_path}")
-        return None
-    
-    # Create timestamp for the zip file
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    app_name = os.path.basename(app_path).replace('.app', '')
-    zip_filename = f"{app_name}_{timestamp}.zip"
-    zip_path = os.path.join(output_dir, zip_filename)
-    
-    print(f"Creating distribution zip: {zip_filename}")
-    
-    try:
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            # Walk through all files in the app bundle
-            for root, dirs, files in os.walk(app_path):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    # Calculate the relative path within the zip
-                    arcname = os.path.relpath(file_path, os.path.dirname(app_path))
-                    zipf.write(file_path, arcname)
-        
-        # Get zip file size for reporting
-        zip_size = os.path.getsize(zip_path) / (1024 * 1024)  # Size in MB
-        print(f"✅ Distribution zip created: {zip_filename} ({zip_size:.1f} MB)")
-        return zip_path
-        
-    except Exception as e:
-        print(f"❌ Error creating zip file: {e}")
-        return None
 
 # --- Find required data and binaries ---
 
@@ -119,18 +84,3 @@ setup(
     options={"build_exe": build_exe_options, "bdist_mac": bdist_mac_options},
     executables=executables,
 )
-
-# --- Post-build step: Create distribution zip ---
-if __name__ == "__main__" and len(sys.argv) > 1 and "bdist_mac" in sys.argv:
-    # Only run post-build step when building macOS app
-    app_path = os.path.join("build", "MediaTool.app")
-    if os.path.exists(app_path):
-        print("\n" + "="*50)
-        print("POST-BUILD: Creating distribution package...")
-        print("="*50)
-        zip_path = zip_app_bundle(app_path)
-        if zip_path:
-            print(f"📦 Ready for distribution: {os.path.basename(zip_path)}")
-        print("="*50)
-    else:
-        print("Warning: MediaTool.app not found, skipping zip creation")
