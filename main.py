@@ -10,6 +10,40 @@ from collections import defaultdict
 from timezonefinder import TimezoneFinder
 from zoneinfo import ZoneInfo
 
+def get_exiftool_executable():
+    """
+    Returns the path to the exiftool executable.
+    Handles both development and packaged app scenarios.
+    """
+    import shutil
+    
+    # Check if we're running from a packaged app (cx_Freeze)
+    if getattr(sys, 'frozen', False):
+        # Running from a packaged app
+        if sys.platform == 'darwin':  # macOS
+            # In macOS app bundle, exiftool is in Contents/Resources/
+            app_dir = os.path.dirname(sys.executable)
+            # Go up from MacOS to Contents, then to Resources
+            resources_dir = os.path.join(os.path.dirname(app_dir), 'Resources')
+            exiftool_path = os.path.join(resources_dir, 'exiftool')
+            
+            if os.path.exists(exiftool_path) and os.access(exiftool_path, os.X_OK):
+                return exiftool_path
+        else:
+            # For other platforms, exiftool should be in the same directory as the executable
+            exiftool_path = os.path.join(os.path.dirname(sys.executable), 'exiftool')
+        
+            if os.path.exists(exiftool_path) and os.access(exiftool_path, os.X_OK):
+                return exiftool_path
+    
+    # Fallback: try to find exiftool in PATH (development environment)
+    exiftool_path = shutil.which('exiftool')
+    if exiftool_path:
+        return exiftool_path
+    
+    # If we get here, we couldn't find exiftool
+    raise Exception("Could not find exiftool executable. Please ensure exiftool is installed and accessible.")
+
 # Create a single TimezoneFinder instance for reuse to improve performance.
 tf = TimezoneFinder()
 
@@ -200,8 +234,14 @@ def rename_media(folder_path: str, timezone: str | None = None, dry_run: bool = 
         count_total = len(files)
 
         import exiftool
-        with exiftool.ExifToolHelper() as et:
-            metadata_list = et.get_metadata(files)
+        
+        # Use our custom exiftool path resolution for reliable cross-platform support
+        try:
+            exiftool_path = get_exiftool_executable()
+            with exiftool.ExifToolHelper(executable=exiftool_path) as et:
+                metadata_list = et.get_metadata(files)
+        except Exception as e:
+            raise Exception(f"ExifTool operation failed: {e}")
 
         if debug:
             print(f"[{'count':<5}/{'total':<5}] -- {'flag':<15} {'file_name':<40} {'quicktime_date':<20} {'exif_date':<20} {'lat':<10} {'lon':<10} {'brand':<15} {'model':<25} {'exif_offst':<10} {'qt_creation_date':<25} {'k_creation_date':<20}")
