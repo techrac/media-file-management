@@ -59,7 +59,8 @@ The GUI provides a user-friendly interface with:
 
 ## Development
 
-# activate the virtual env
+```bash
+# activate the virtual env (if using one)
 source ./.venv/bin/activate
 
 # run command line version (debug from IDE)
@@ -70,3 +71,22 @@ python gui.py
 
 # package the Mac app (with cx_freeze)
 python setup.py bdist_mac
+```
+
+The build process will:
+1. Create the `MediaTool.app` bundle in `build/`
+2. Automatically create a timestamped distribution zip (e.g., `MediaTool_20251002_152502.zip`)
+3. The zip file is ready for distribution and contains the complete app bundle
+
+## Installation
+
+### From Pre-built Release
+1. Download the latest `MediaTool_YYYYMMDD_HHMMSS.zip` from releases
+2. Extract the zip file
+3. Drag `MediaTool.app` to your Applications folder
+4. Double-click to run (you may need to allow it in System Preferences > Security & Privacy)
+
+### From Source
+1. Install Python 3.12+ and required dependencies: `pip install -r requirements.txt`
+2. Build the app: `python setup.py bdist_mac`
+3. Find the app in `build/MediaTool.app` and the distribution zip in `build/`
