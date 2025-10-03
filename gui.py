@@ -7,6 +7,7 @@ import os
 import json
 from datetime import datetime
 from zoneinfo import available_timezones
+from version import __version__
 
 # This ensures that we can find main.py, regardless of where the script is run from.
 # It adds the script's own directory to the Python's search path.
@@ -52,7 +53,7 @@ class QueueWriter:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Media Organization Tool")
+        self.title(f"Media Organization Tool v{__version__}")
         self.geometry("800x600")
 
         self.config_file = os.path.join(os.path.expanduser("~"), ".media_tool_gui.json")

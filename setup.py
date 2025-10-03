@@ -2,6 +2,7 @@ import sys
 import os
 from cx_Freeze import setup, Executable
 import exiftool  # To find the executable
+from version import __version__
 
 
 def get_package_path(package_name):
@@ -92,7 +93,7 @@ executables = [
 # --- Setup ---
 setup(
     name="MediaTool",
-    version="1.0",
+    version=__version__,
     description="A tool to organize media files.",
     options={"build_exe": build_exe_options, "bdist_mac": bdist_mac_options},
     executables=executables,
