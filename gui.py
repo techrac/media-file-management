@@ -105,7 +105,7 @@ class App(tk.Tk):
         ttk.Checkbutton(settings_frame, text="Debug (verbose output)", variable=self.debug_var, command=self.update_command_preview).pack(anchor=tk.W)
 
         # --- Timezone Selector ---
-        ttk.Label(settings_frame, text="Timezone (for renaming videos without GPS):").pack(anchor=tk.W, pady=(10, 0))
+        ttk.Label(settings_frame, text="Timezone (for renaming files without any time zone info):").pack(anchor=tk.W, pady=(10, 0))
         self.timezone_var = tk.StringVar()
         self.timezone_var.trace_add("write", self.update_command_preview)
         # Get all IANA timezones and add a blank option for 'None'

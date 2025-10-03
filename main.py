@@ -271,6 +271,9 @@ def rename_media(folder_path: str, timezone: str | None = None, dry_run: bool = 
             date_prefix = dt_object.strftime('%Y%m%d')
             time_prefix = dt_object.strftime('%H%M%S')
 
+            if flag == 'assumed_local':
+                timestamp_prefix += '_UTZ' # this is to show that the timestamp is in an unknown timezone
+
             # Get original name and lowercase extension
             original_name, extension = os.path.splitext(file_name)
             lower_extension = extension.lower()
