@@ -104,6 +104,9 @@ class App(tk.Tk):
         self.debug_var = tk.BooleanVar()
         ttk.Checkbutton(settings_frame, text="Debug (verbose output)", variable=self.debug_var, command=self.update_command_preview).pack(anchor=tk.W)
 
+        self.force_overwrite_var = tk.BooleanVar()
+        ttk.Checkbutton(settings_frame, text="Force Overwrite (replace existing timestamp prefixes)", variable=self.force_overwrite_var, command=self.update_command_preview).pack(anchor=tk.W)
+
         # --- Timezone Selector ---
         ttk.Label(settings_frame, text="Timezone (for renaming files without any time zone info):").pack(anchor=tk.W, pady=(10, 0))
         self.timezone_var = tk.StringVar()
@@ -206,6 +209,7 @@ class App(tk.Tk):
         if self.rename_var.get(): parts.append("--rename")
         if self.dry_run_var.get(): parts.append("--dry-run")
         if self.debug_var.get(): parts.append("--debug")
+        if self.force_overwrite_var.get(): parts.append("--force-overwrite")
         timezone = self.timezone_var.get()
         if timezone:
             parts.append(f'--timezone "{timezone}"')
@@ -242,6 +246,7 @@ class App(tk.Tk):
             "do_rename": self.rename_var.get(),
             "is_dry_run": self.dry_run_var.get(),
             "is_debug": self.debug_var.get(),
+            "force_overwrite": self.force_overwrite_var.get(),
             "timezone": self.timezone_var.get() or None,
         }
         
@@ -274,6 +279,7 @@ class App(tk.Tk):
                     folder_path=params["folder_path"],
                     dry_run=params["is_dry_run"],
                     debug=params["is_debug"],
+                    force_overwrite=params["force_overwrite"],
                     timezone=params["timezone"]
                 )
             

@@ -215,7 +215,7 @@ def find_duplicate_files(directory_path: str) -> dict[str, list[str]]:
     duplicates = {checksum: paths for checksum, paths in checksums.items() if len(paths) > 1}
     return duplicates
 
-def rename_media(folder_path: str, timezone: str | None = None, dry_run: bool = False, debug: bool = False):
+def rename_media(folder_path: str, timezone: str | None = None, dry_run: bool = False, debug: bool = False, force_overwrite: bool = False):
     try:
         photos_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.heic')
         videos_extensions = ('.mp4', '.avi', '.mov')
@@ -274,6 +274,41 @@ def rename_media(folder_path: str, timezone: str | None = None, dry_run: bool = 
             original_name, extension = os.path.splitext(file_name)
             lower_extension = extension.lower()
 
+            # Handle force_overwrite: detect and remove existing timestamp prefixes
+            if force_overwrite:
+                # Pattern to match existing timestamp prefixes: YYYYMMDD_HHMMSS or YYYYMMDD_HHMMSS_*
+                existing_timestamp_pattern = r'^(\d{8}_\d{6})(?:_[A-Z]+)?(?:-|_)(.*)$'
+                match = re.match(existing_timestamp_pattern, original_name)
+                if match:
+                    timestamp_str = match.group(1)  # YYYYMMDD_HHMMSS
+                    try:
+                        # Validate that this is actually a valid date
+                        year = int(timestamp_str[:4])
+                        month = int(timestamp_str[4:6])
+                        day = int(timestamp_str[6:8])
+                        hour = int(timestamp_str[9:11])
+                        minute = int(timestamp_str[11:13])
+                        second = int(timestamp_str[13:15])
+                        
+                        # Basic validation
+                        if (1 <= month <= 12 and 1 <= day <= 31 and 
+                            0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 59 and
+                            1900 <= year <= 2100):  # Reasonable year range
+                            
+                            # Extract the original name part after removing timestamp prefix
+                            original_name = match.group(2)
+                            if debug:
+                                print(f"[FORCE OVERWRITE] Detected valid timestamp in '{file_name}', original name: '{original_name}'")
+                        else:
+                            if debug:
+                                print(f"[FORCE OVERWRITE] Invalid date in timestamp '{timestamp_str}' in '{file_name}'")
+                    except (ValueError, IndexError):
+                        if debug:
+                            print(f"[FORCE OVERWRITE] Invalid timestamp format '{timestamp_str}' in '{file_name}'")
+                else:
+                    if debug:
+                        print(f"[FORCE OVERWRITE] No existing timestamp prefix found in '{file_name}'")
+
             # remove timestamps duplicates
             original_name_cleaned = original_name.replace(timestamp_prefix, '').replace(date_prefix, '').replace(time_prefix, '').replace('(', '').replace(')', '')
 
@@ -283,12 +318,15 @@ def rename_media(folder_path: str, timezone: str | None = None, dry_run: bool = 
             # Construct new filename with timestamp prefix and original name suffix
             new_filename_base = f"{timestamp_prefix}-{original_name_cleaned}"
             new_filename_base = new_filename_base.strip('_').strip('-').strip()
-        
-            if new_filename_base == original_name:
-                continue
 
             new_filename = f"{new_filename_base}{lower_extension}"
             new_file_path = os.path.join(folder_path, new_filename)
+
+            # Skip if the new filename is the same as the current filename
+            if new_filename == file_name:
+                if debug:
+                    print(f"[SKIP] Filename unchanged: {file_name}")
+                continue
 
             # check for name collisions
             if os.path.exists(new_file_path):
@@ -442,6 +480,7 @@ def main():
         parser.add_argument("--delete-dups", action="store_true", help="Find duplicate files in the folder based on checksum.")
         parser.add_argument("--flatten", action="store_true", help="Move all files from subdirectories to the root folder and remove empty subdirectories.")
         parser.add_argument("--timezone", help="Specify a timezone (e.g., 'Europe/Paris') to use for UTC conversion when GPS data is missing.")
+        parser.add_argument("--force-overwrite", action="store_true", help="Force overwrite existing timestamp prefixes in filenames (useful for correcting files processed with wrong timezone).")
         args = parser.parse_args()
 
         if args.flatten:
@@ -451,7 +490,7 @@ def main():
             process_duplicate_files(folder_path= args.folder_path, dry_run=args.dry_run, debug=args.debug)
             
         if args.rename:
-            rename_media(folder_path= args.folder_path, timezone=args.timezone, dry_run=args.dry_run, debug=args.debug)
+            rename_media(folder_path= args.folder_path, timezone=args.timezone, dry_run=args.dry_run, debug=args.debug, force_overwrite=args.force_overwrite)
 
     except Exception as ex:
          print('=== FATAL ERROR')
