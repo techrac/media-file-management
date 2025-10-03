@@ -161,8 +161,7 @@ def extract_date_from_metadata(metadata, timezone: str | None = None) -> tuple[d
             except Exception as e:
                 raise Exception(f"Invalid timezone '{timezone}': {e}") from e
         else:
-            timestamp = raw_date
-            flag = 'assumed_local'
+            raise Exception(f"No timezone information found in metadata. Please explicitly specify the timezone. QuickTime:CreateDate appears to be in UTC: {raw_date}")
     else:
         raise Exception(f"Unable to extract a timestamp from metadata")
     
