@@ -78,6 +78,14 @@ build_exe_options = {
 bdist_mac_options = {
     "bundle_name": "MediaTool",
     "iconfile": "graphics/MediaTool.icns",
+    "plist_items": [
+        ("CFBundleIdentifier", "com.mediatool.app"),
+        ("CFBundleInfoDictionaryVersion", "6.0"),
+        ("CFBundleName", "MediaTool"),
+        ("CFBundleShortVersionString", __version__),
+        ("CFBundleVersion", __version__),
+        ("NSHighResolutionCapable", True),
+    ],
 }
 
 # Set the base for a GUI application.
