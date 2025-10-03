@@ -340,7 +340,7 @@ def rename_media(folder_path: str, timezone: str | None = None, dry_run: bool = 
                 os.rename(file_path, new_file_path)
                 logs.append(f"Renamed ; '{file_name}' ; '{new_filename}'")
 
-        print(f"==== counts: total:{count_total}    parsed:{len(metadata_list)}    ok:{count_ok}    renamed:{count_renamed}    error:{len(errors)})")
+        print(f"==== counts: total:{count_total}    parsed:{len(metadata_list)}    ok:{count_ok}    renamed:{count_renamed}    error:{len(errors)}")
         for e in errors:
             print(f"error: {e}")
 
