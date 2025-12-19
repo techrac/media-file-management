@@ -192,11 +192,11 @@ class App(tk.Tk):
         ttk.Checkbutton(self.remote_cleanup_frame, text="Cleanup problematic filenames", variable=self.cleanup_filenames_var).pack(anchor=tk.W)
         
         ttk.Label(self.remote_cleanup_frame, text="Problematic characters:").pack(anchor=tk.W, pady=(10, 0))
-        self.problem_chars_var = tk.StringVar(value=": ~")
+        self.problem_chars_var = tk.StringVar(value="?, ;, :, ~, !, $, /, \\")
         ttk.Entry(self.remote_cleanup_frame, textvariable=self.problem_chars_var, width=30).pack(anchor=tk.W, fill=tk.X)
         
         ttk.Label(self.remote_cleanup_frame, text="Replacement characters:").pack(anchor=tk.W, pady=(5, 0))
-        self.char_replacements_var = tk.StringVar(value="- _")
+        self.char_replacements_var = tk.StringVar(value="_, _, -, _, _, _, _, _")
         ttk.Entry(self.remote_cleanup_frame, textvariable=self.char_replacements_var, width=30).pack(anchor=tk.W, fill=tk.X)
         
         ttk.Label(self.remote_cleanup_frame, text="Exclude folders:").pack(anchor=tk.W, pady=(5, 0))
@@ -517,8 +517,7 @@ class App(tk.Tk):
                     if params["cleanup_permissions"]:
                         self.queue.put("Scanning for permission issues...\n")
                         permission_issues = scan_permission_issues(ssh_client, params["share_path"], params["share_owner"])
-                        self.queue.put(f"Found {len(permission_issues['wrong_owner_files'])} files and {len(permission_issues['wrong_owner_dirs'])} directories with wrong ownership.\n")
-                        self.queue.put(f"Found {len(permission_issues['executable_images'])} executable image files.\n\n")
+                        self.queue.put(f"Found {len(permission_issues['wrong_owner_files'])} files and {len(permission_issues['wrong_owner_dirs'])} directories with wrong ownership.\n\n")
                     
                     if params["cleanup_empty_folders"]:
                         self.queue.put("Scanning for empty folders...\n")

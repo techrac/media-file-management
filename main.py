@@ -527,7 +527,7 @@ def disconnect_ssh(ssh_client):
 
 def scan_permission_issues(ssh_client, share_path: str, username: str):
     """
-    Scans for permission issues: wrong ownership and executable image files.
+    Scans for permission issues: wrong ownership (files and directories).
     
     Args:
         ssh_client: SSHClient instance
@@ -535,12 +535,11 @@ def scan_permission_issues(ssh_client, share_path: str, username: str):
         username: Username of the share owner
     
     Returns:
-        dict with keys: 'wrong_owner_files', 'wrong_owner_dirs', 'executable_images'
+        dict with keys: 'wrong_owner_files', 'wrong_owner_dirs'
     """
     results = {
         'wrong_owner_files': [],
-        'wrong_owner_dirs': [],
-        'executable_images': []
+        'wrong_owner_dirs': []
     }
     
     # Find files with wrong ownership
@@ -554,12 +553,6 @@ def scan_permission_issues(ssh_client, share_path: str, username: str):
     stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
     if stdout.strip():
         results['wrong_owner_dirs'] = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
-    
-    # Find executable image files
-    cmd = f"find '{share_path}' -type f \\( -perm -u=x -o -perm -g=x -o -perm -o=x \\) \\( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o -iname '*.bmp' -o -iname '*.tiff' \\) 2>/dev/null"
-    stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
-    if stdout.strip():
-        results['executable_images'] = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
     
     return results
 
@@ -700,14 +693,14 @@ def generate_categorized_cleanup_scripts(
         legacy_files: Dict from scan_legacy_files_remote
         problematic_filenames: List of tuples from scan_problematic_filenames_remote
         exclude_patterns: List of folder names to exclude
-        output_dir: Directory to write scripts (default: timestamped directory in user's home/Documents)
+        output_dir: Directory to write scripts (default: timestamped directory in user's Downloads)
     """
     if output_dir is None:
-        # Use Documents folder or home directory as default location (writable by user)
+        # Use Downloads folder or home directory as default location (writable by user)
         home_dir = os.path.expanduser("~")
-        documents_dir = os.path.join(home_dir, "Documents")
-        if os.path.exists(documents_dir) and os.access(documents_dir, os.W_OK):
-            base_dir = documents_dir
+        downloads_dir = os.path.join(home_dir, "Downloads")
+        if os.path.exists(downloads_dir) and os.access(downloads_dir, os.W_OK):
+            base_dir = downloads_dir
         else:
             base_dir = home_dir
         output_dir = os.path.join(base_dir, f"qnap_cleanup_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
@@ -733,15 +726,13 @@ def generate_categorized_cleanup_scripts(
             f.write(f"# Share owner: {username}\n")
             f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             f.write("set -e  # Exit on error\n\n")
-            f.write("echo \"=== Fixing File Ownership ===\"\n")
+            f.write("echo \"=== Fixing File and Directory Ownership ===\"\n")
             f.write(f"sudo find {escape_shell_path(share_path)} -not -user {username} -exec chown {username}:everyone {{}} \\;\n")
             f.write(f"sudo find {escape_shell_path(share_path)} -not -group everyone -exec chown {username}:everyone {{}} \\;\n\n")
-            f.write("echo \"=== Fixing Directory Permissions ===\"\n")
-            f.write(f"find {escape_shell_path(share_path)} -mindepth 1 -type d -exec chmod u+x {{}} \\;\n\n")
-            f.write("echo \"=== Removing Execute Permissions from Image Files ===\"\n")
-            f.write(f"sudo find {escape_shell_path(share_path)} -type f \\( -perm -u=x -o -perm -g=x -o -perm -o=x \\) \\\n")
-            f.write("  \\( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o -iname '*.bmp' -o -iname '*.tiff' \\) \\\n")
-            f.write("  -exec chmod -x {{}} \\;\n\n")
+            f.write("echo \"=== Setting Directory Permissions to 777 ===\"\n")
+            f.write(f"sudo find {escape_shell_path(share_path)} -mindepth 1 -type d -exec chmod 777 {{}} \\;\n\n")
+            f.write("echo \"=== Setting File Permissions to 666 (rw-rw-rw-) ===\"\n")
+            f.write(f"sudo find {escape_shell_path(share_path)} -type f -exec chmod 666 {{}} \\;\n\n")
             f.write("echo \"=== Permission fixes complete ===\"\n")
         os.chmod(script_path, 0o755)
         scripts_generated.append(script_path)
@@ -757,28 +748,19 @@ def generate_categorized_cleanup_scripts(
             f.write("set -e  # Exit on error\n\n")
             
             if legacy_files.get('files'):
-                f.write("echo \"=== Listing Windows cache files to delete ===\"\n")
-                for file_path in legacy_files['files']:
-                    f.write(f"# {file_path}\n")
-                f.write("\necho \"=== Deleting Windows cache files ===\"\n")
+                f.write("echo \"=== Deleting Windows cache files ===\"\n")
                 for file_path in legacy_files['files']:
                     f.write(f"sudo rm -f {escape_shell_path(file_path)}\n")
                 f.write("\n")
             
             if legacy_files.get('directories'):
-                f.write("echo \"=== Listing directories to delete ===\"\n")
-                for dir_path in legacy_files['directories']:
-                    f.write(f"# {dir_path}\n")
-                f.write("\necho \"=== Deleting directories ===\"\n")
+                f.write("echo \"=== Deleting directories ===\"\n")
                 for dir_path in legacy_files['directories']:
                     f.write(f"sudo rm -rf {escape_shell_path(dir_path)}\n")
                 f.write("\n")
             
             if legacy_files.get('resource_forks'):
-                f.write("echo \"=== Listing macOS resource fork files to delete ===\"\n")
-                for file_path in legacy_files['resource_forks']:
-                    f.write(f"# {file_path}\n")
-                f.write("\necho \"=== Deleting macOS resource fork files ===\"\n")
+                f.write("echo \"=== Deleting macOS resource fork files ===\"\n")
                 for file_path in legacy_files['resource_forks']:
                     f.write(f"sudo rm -f {escape_shell_path(file_path)}\n")
                 f.write("\n")
@@ -902,8 +884,8 @@ def main():
         parser.add_argument("--cleanup-empty-folders", action="store_true", help="Enable empty folder cleanup scan.")
         parser.add_argument("--cleanup-legacy-files", action="store_true", help="Enable legacy file cleanup scan (includes Windows cache files, .streams, ._* resource fork files).")
         parser.add_argument("--cleanup-filenames", action="store_true", help="Enable filename character replacement scan.")
-        parser.add_argument("--problem-chars", default=": ~", help="Comma-separated list of problematic characters to replace (default: ': ~').")
-        parser.add_argument("--char-replacements", default="- _", help="Comma-separated list of replacement characters (default: '- _' - must match order of problem-chars).")
+        parser.add_argument("--problem-chars", default="?, ;, :, ~, !, $, /, \\", help="Comma-separated list of problematic characters to replace (default: '?, ;, :, ~, !, $, /, \\').")
+        parser.add_argument("--char-replacements", default="_, _, -, _, _, _, _, _", help="Comma-separated list of replacement characters (default: '_, _, -, _, _, _, _, _' - must match order of problem-chars).")
         parser.add_argument("--exclude-folder", default=".fcpbundle", help="Comma-separated list of folder names to exclude from empty folder cleanup (default: '.fcpbundle').")
         parser.add_argument("--output-dir", help="Directory for generated scripts (default: qnap_cleanup_YYYYMMDD_HHMMSS/).")
         
@@ -945,8 +927,7 @@ def main():
                 if do_permissions:
                     print("Scanning for permission issues...")
                     permission_issues = scan_permission_issues(ssh_client, args.share_path, args.share_owner)
-                    print(f"Found {len(permission_issues['wrong_owner_files'])} files and {len(permission_issues['wrong_owner_dirs'])} directories with wrong ownership.")
-                    print(f"Found {len(permission_issues['executable_images'])} executable image files.\n")
+                    print(f"Found {len(permission_issues['wrong_owner_files'])} files and {len(permission_issues['wrong_owner_dirs'])} directories with wrong ownership.\n")
                 
                 if do_empty_folders:
                     print("Scanning for empty folders...")
