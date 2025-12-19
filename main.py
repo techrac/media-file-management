@@ -471,6 +471,7 @@ def flatten_directory(folder_path: str, dry_run: bool = False):
 # SSH-Based Remote Cleanup Functions
 # ============================================================================
 
+
 def connect_ssh(host: str, username: str, key_file: str, port: int = 22):
     """
     Establishes SSH connection using paramiko. Uses key-based authentication only.
@@ -631,36 +632,57 @@ def scan_legacy_files_remote(ssh_client, share_path: str):
     
     return results
 
-def scan_problematic_filenames_remote(ssh_client, share_path: str, problem_chars: list, char_replacements: list):
+def scan_problematic_filenames_remote(ssh_client, share_path: str, problem_chars: list):
     """
-    Scans for files/directories containing problematic characters.
+    Scans for files/directories containing problematic characters or leading/trailing spaces.
+    Replaces problematic characters with underscore and trims spaces from filenames.
     
     Args:
         ssh_client: SSHClient instance
         share_path: Path to the share root
-        problem_chars: List of problematic characters (e.g., [':', '~'])
-        char_replacements: List of replacement characters (e.g., ['-', '_'])
+        problem_chars: List of problematic characters (e.g., [':', '~', '?'])
     
     Returns:
         List of tuples: (original_path, sanitized_path)
     """
-    if len(problem_chars) != len(char_replacements):
-        raise ValueError("problem_chars and char_replacements must have the same length")
+    import os.path
     
-    # Build find pattern to match files/dirs with problematic characters
+    # Build find pattern to match files/dirs with problematic characters or spaces
     char_pattern = ' '.join([f"-o -name '*{char}*'" for char in problem_chars])
     char_pattern = char_pattern[4:]  # Remove leading " -o "
     
-    cmd = f"find '{share_path}' \\( -type f -o -type d \\) \\( {char_pattern} \\) 2>/dev/null"
+    # Also find files/dirs with leading or trailing spaces in the name
+    # Use -mindepth 1 to exclude the root directory itself
+    cmd = f"find '{share_path}' -mindepth 1 \\( -type f -o -type d \\) \\( {char_pattern} -o -name ' *' -o -name '* ' \\) 2>/dev/null"
     stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
     
     rename_list = []
     if stdout.strip():
         paths = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
         for path in paths:
-            sanitized = path
-            for prob_char, repl_char in zip(problem_chars, char_replacements):
-                sanitized = sanitized.replace(prob_char, repl_char)
+            # Split path into directory and basename
+            dir_name = os.path.dirname(path)
+            basename = os.path.basename(path)
+            
+            # Replace problematic characters with underscore
+            sanitized_basename = basename
+            for prob_char in problem_chars:
+                sanitized_basename = sanitized_basename.replace(prob_char, '_')
+            
+            # Trim leading and trailing spaces
+            sanitized_basename = sanitized_basename.strip()
+            
+            # Skip if basename becomes empty after sanitization
+            if not sanitized_basename:
+                continue
+            
+            # Reconstruct the full path
+            if dir_name and dir_name != '.':
+                sanitized = os.path.join(dir_name, sanitized_basename)
+            else:
+                sanitized = sanitized_basename
+            
+            # Only add to rename list if something changed
             if sanitized != path:
                 rename_list.append((path, sanitized))
     
@@ -680,7 +702,8 @@ def generate_categorized_cleanup_scripts(
     legacy_files: dict = None,
     problematic_filenames: list = None,
     exclude_patterns: list = None,
-    output_dir: str = None
+    output_dir: str = None,
+    ssh_client = None
 ):
     """
     Generates categorized bash script files for cleanup operations.
@@ -693,23 +716,26 @@ def generate_categorized_cleanup_scripts(
         legacy_files: Dict from scan_legacy_files_remote
         problematic_filenames: List of tuples from scan_problematic_filenames_remote
         exclude_patterns: List of folder names to exclude
-        output_dir: Directory to write scripts (default: timestamped directory in user's Downloads)
+        output_dir: Directory to write scripts (default: Downloads folder with timestamp subfolder)
+        ssh_client: Optional SSH client (not used, kept for backward compatibility)
     """
     if output_dir is None:
-        # Use Downloads folder or home directory as default location (writable by user)
+        # Use Downloads folder or home directory with timestamp subfolder
         home_dir = os.path.expanduser("~")
         downloads_dir = os.path.join(home_dir, "Downloads")
         if os.path.exists(downloads_dir) and os.access(downloads_dir, os.W_OK):
             base_dir = downloads_dir
         else:
             base_dir = home_dir
-        output_dir = os.path.join(base_dir, f"qnap_cleanup_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        output_dir = os.path.join(base_dir, f"qnap_cleanup_{timestamp}")
     else:
         # If user provided a relative path, make it absolute from home directory
         if not os.path.isabs(output_dir):
             home_dir = os.path.expanduser("~")
             output_dir = os.path.join(home_dir, output_dir)
     
+    # Create the directory locally
     os.makedirs(output_dir, exist_ok=True)
     
     exclude_patterns = exclude_patterns or ['.fcpbundle']
@@ -827,20 +853,21 @@ def generate_categorized_cleanup_scripts(
             f.write("SCRIPT_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")\" && pwd)\"\n\n")
             f.write("echo \"=== Starting QNAP Cleanup Scripts ===\"\n\n")
             
-            # Execute scripts in order
-            if permission_issues and os.path.exists(os.path.join(output_dir, 'permissions_to_fix.sh')):
+            # Execute scripts in order - check if files exist in the generated scripts list
+            script_names = [os.path.basename(s) for s in scripts_generated]
+            if 'permissions_to_fix.sh' in script_names:
                 f.write("echo \"\\n[1/4] Running permission fixes...\"\n")
                 f.write("bash \"$SCRIPT_DIR/permissions_to_fix.sh\"\n\n")
             
-            if problematic_filenames and os.path.exists(os.path.join(output_dir, 'files_to_rename.sh')):
+            if 'files_to_rename.sh' in script_names:
                 f.write("echo \"\\n[2/4] Running filename sanitization...\"\n")
                 f.write("bash \"$SCRIPT_DIR/files_to_rename.sh\"\n\n")
             
-            if legacy_files and os.path.exists(os.path.join(output_dir, 'files_to_delete.sh')):
+            if 'files_to_delete.sh' in script_names:
                 f.write("echo \"\\n[3/4] Deleting legacy files...\"\n")
                 f.write("bash \"$SCRIPT_DIR/files_to_delete.sh\"\n\n")
             
-            if empty_folders and os.path.exists(os.path.join(output_dir, 'folders_to_delete.sh')):
+            if 'folders_to_delete.sh' in script_names:
                 f.write("echo \"\\n[4/4] Deleting empty folders...\"\n")
                 f.write("bash \"$SCRIPT_DIR/folders_to_delete.sh\"\n\n")
             
@@ -884,8 +911,7 @@ def main():
         parser.add_argument("--cleanup-empty-folders", action="store_true", help="Enable empty folder cleanup scan.")
         parser.add_argument("--cleanup-legacy-files", action="store_true", help="Enable legacy file cleanup scan (includes Windows cache files, .streams, ._* resource fork files).")
         parser.add_argument("--cleanup-filenames", action="store_true", help="Enable filename character replacement scan.")
-        parser.add_argument("--problem-chars", default="?, ;, :, ~, !, $, /, \\", help="Comma-separated list of problematic characters to replace (default: '?, ;, :, ~, !, $, /, \\').")
-        parser.add_argument("--char-replacements", default="_, _, -, _, _, _, _, _", help="Comma-separated list of replacement characters (default: '_, _, -, _, _, _, _, _' - must match order of problem-chars).")
+        parser.add_argument("--problem-chars", default="?, ;, :, ~, !, $, /, \\", help="Comma-separated list of problematic characters to replace with underscore (default: '?, ;, :, ~, !, $, /, \\'). Spaces are also trimmed from filenames.")
         parser.add_argument("--exclude-folder", default=".fcpbundle", help="Comma-separated list of folder names to exclude from empty folder cleanup (default: '.fcpbundle').")
         parser.add_argument("--output-dir", help="Directory for generated scripts (default: qnap_cleanup_YYYYMMDD_HHMMSS/).")
         
@@ -906,11 +932,8 @@ def main():
             if not (do_permissions or do_empty_folders or do_legacy_files or do_filenames):
                 parser.error("Remote mode requires at least one cleanup operation (use --cleanup-all or specific --cleanup-* flags)")
             
-            # Parse problem chars and replacements
+            # Parse problem chars (all replaced with underscore, spaces trimmed)
             problem_chars = [c.strip() for c in args.problem_chars.split(',')]
-            char_replacements = [c.strip() for c in args.char_replacements.split(',')]
-            if len(problem_chars) != len(char_replacements):
-                parser.error("--problem-chars and --char-replacements must have the same number of items")
             
             exclude_patterns = [p.strip() for p in args.exclude_folder.split(',')]
             
@@ -942,7 +965,7 @@ def main():
                 
                 if do_filenames:
                     print("Scanning for problematic filenames...")
-                    problematic_filenames = scan_problematic_filenames_remote(ssh_client, args.share_path, problem_chars, char_replacements)
+                    problematic_filenames = scan_problematic_filenames_remote(ssh_client, args.share_path, problem_chars)
                     print(f"Found {len(problematic_filenames)} files/directories with problematic characters.\n")
                 
                 print("Generating cleanup scripts...")
@@ -954,7 +977,8 @@ def main():
                     legacy_files=legacy_files,
                     problematic_filenames=problematic_filenames,
                     exclude_patterns=exclude_patterns,
-                    output_dir=args.output_dir
+                    output_dir=args.output_dir,
+                    ssh_client=ssh_client
                 )
                 
                 print(f"\n=== Scripts generated successfully ===")

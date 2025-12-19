@@ -191,13 +191,9 @@ class App(tk.Tk):
         self.cleanup_filenames_var = tk.BooleanVar()
         ttk.Checkbutton(self.remote_cleanup_frame, text="Cleanup problematic filenames", variable=self.cleanup_filenames_var).pack(anchor=tk.W)
         
-        ttk.Label(self.remote_cleanup_frame, text="Problematic characters:").pack(anchor=tk.W, pady=(10, 0))
+        ttk.Label(self.remote_cleanup_frame, text="Problematic characters (replaced with _; spaces trimmed):").pack(anchor=tk.W, pady=(10, 0))
         self.problem_chars_var = tk.StringVar(value="?, ;, :, ~, !, $, /, \\")
         ttk.Entry(self.remote_cleanup_frame, textvariable=self.problem_chars_var, width=30).pack(anchor=tk.W, fill=tk.X)
-        
-        ttk.Label(self.remote_cleanup_frame, text="Replacement characters:").pack(anchor=tk.W, pady=(5, 0))
-        self.char_replacements_var = tk.StringVar(value="_, _, -, _, _, _, _, _")
-        ttk.Entry(self.remote_cleanup_frame, textvariable=self.char_replacements_var, width=30).pack(anchor=tk.W, fill=tk.X)
         
         ttk.Label(self.remote_cleanup_frame, text="Exclude folders:").pack(anchor=tk.W, pady=(5, 0))
         self.exclude_folder_var = tk.StringVar(value=".fcpbundle")
@@ -259,7 +255,7 @@ class App(tk.Tk):
             self.remote_cleanup_frame.pack(fill=tk.X, padx=10, pady=5, anchor=tk.W)
             self.remote_settings_frame.pack(fill=tk.X, padx=10, pady=5, anchor=tk.W)
         self.update_command_preview()
-
+        
     def browse_folder(self):
         initial_dir = self.folder_path_var.get()
         if not initial_dir or not os.path.isdir(initial_dir):
@@ -350,22 +346,22 @@ class App(tk.Tk):
         
         mode = self.mode_var.get()
         if mode == "local":
-            folder_path = self.folder_path_var.get()
-            if folder_path:
-                # Use quotes to handle paths with spaces
-                parts.append(f'"{folder_path}"')
-            else:
-                parts.append("<folder_path>")
+        folder_path = self.folder_path_var.get()
+        if folder_path:
+            # Use quotes to handle paths with spaces
+            parts.append(f'"{folder_path}"')
+        else:
+            parts.append("<folder_path>")
 
-            if self.flatten_var.get(): parts.append("--flatten")
-            if self.delete_dups_var.get(): parts.append("--delete-dups")
-            if self.rename_var.get(): parts.append("--rename")
-            if self.dry_run_var.get(): parts.append("--dry-run")
-            if self.debug_var.get(): parts.append("--debug")
-            if self.force_overwrite_var.get(): parts.append("--force-overwrite")
-            timezone = self.timezone_var.get()
-            if timezone:
-                parts.append(f'--timezone "{timezone}"')
+        if self.flatten_var.get(): parts.append("--flatten")
+        if self.delete_dups_var.get(): parts.append("--delete-dups")
+        if self.rename_var.get(): parts.append("--rename")
+        if self.dry_run_var.get(): parts.append("--dry-run")
+        if self.debug_var.get(): parts.append("--debug")
+        if self.force_overwrite_var.get(): parts.append("--force-overwrite")
+        timezone = self.timezone_var.get()
+        if timezone:
+            parts.append(f'--timezone "{timezone}"')
         else:
             # Remote mode
             parts.append("--remote-mode")
@@ -399,10 +395,10 @@ class App(tk.Tk):
         mode = self.mode_var.get()
         
         if mode == "local":
-            folder_path = self.folder_path_var.get()
-            if not folder_path or not os.path.isdir(folder_path):
-                messagebox.showerror("Error", "Please select a valid folder.")
-                return
+        folder_path = self.folder_path_var.get()
+        if not folder_path or not os.path.isdir(folder_path):
+            messagebox.showerror("Error", "Please select a valid folder.")
+            return
         else:
             # Remote mode validation
             if not self.ssh_host_var.get() or not self.ssh_user_var.get() or not self.ssh_key_var.get():
@@ -430,17 +426,17 @@ class App(tk.Tk):
 
         # Get settings from GUI
         if mode == "local":
-            params = {
+        params = {
                 "mode": "local",
-                "folder_path": folder_path,
-                "do_flatten": self.flatten_var.get(),
-                "do_delete_dups": self.delete_dups_var.get(),
-                "do_rename": self.rename_var.get(),
-                "is_dry_run": self.dry_run_var.get(),
-                "is_debug": self.debug_var.get(),
-                "force_overwrite": self.force_overwrite_var.get(),
-                "timezone": self.timezone_var.get() or None,
-            }
+            "folder_path": folder_path,
+            "do_flatten": self.flatten_var.get(),
+            "do_delete_dups": self.delete_dups_var.get(),
+            "do_rename": self.rename_var.get(),
+            "is_dry_run": self.dry_run_var.get(),
+            "is_debug": self.debug_var.get(),
+            "force_overwrite": self.force_overwrite_var.get(),
+            "timezone": self.timezone_var.get() or None,
+        }
         else:
             params = {
                 "mode": "remote",
@@ -455,7 +451,6 @@ class App(tk.Tk):
                 "cleanup_legacy_files": self.cleanup_legacy_files_var.get(),
                 "cleanup_filenames": self.cleanup_filenames_var.get(),
                 "problem_chars": [c.strip() for c in self.problem_chars_var.get().split(',')],
-                "char_replacements": [c.strip() for c in self.char_replacements_var.get().split(',')],
                 "exclude_folder": [p.strip() for p in self.exclude_folder_var.get().split(',')],
                 "output_dir": self.output_dir_var.get() or None,
             }
@@ -476,25 +471,25 @@ class App(tk.Tk):
         try:
             if params["mode"] == "local":
                 self.queue.put("--- Starting local mode tasks ---\n")
-                if params["do_flatten"]:
-                    self.queue.put("\n=== Running: Flatten Directory ===\n")
-                    flatten_directory(folder_path=params["folder_path"], dry_run=params["is_dry_run"])
-                
-                if params["do_delete_dups"]:
-                    self.queue.put("\n=== Running: Find/Delete Duplicates ===\n")
-                    process_duplicate_files(folder_path=params["folder_path"], dry_run=params["is_dry_run"], debug=params["is_debug"])
+            if params["do_flatten"]:
+                self.queue.put("\n=== Running: Flatten Directory ===\n")
+                flatten_directory(folder_path=params["folder_path"], dry_run=params["is_dry_run"])
+            
+            if params["do_delete_dups"]:
+                self.queue.put("\n=== Running: Find/Delete Duplicates ===\n")
+                process_duplicate_files(folder_path=params["folder_path"], dry_run=params["is_dry_run"], debug=params["is_debug"])
 
-                if params["do_rename"]:
-                    self.queue.put("\n=== Running: Rename Media ===\n")
-                    rename_media(
-                        folder_path=params["folder_path"],
-                        dry_run=params["is_dry_run"],
-                        debug=params["is_debug"],
-                        force_overwrite=params["force_overwrite"],
-                        timezone=params["timezone"]
-                    )
-                
-                self.queue.put("\n--- All tasks completed! ---\n")
+            if params["do_rename"]:
+                self.queue.put("\n=== Running: Rename Media ===\n")
+                rename_media(
+                    folder_path=params["folder_path"],
+                    dry_run=params["is_dry_run"],
+                    debug=params["is_debug"],
+                    force_overwrite=params["force_overwrite"],
+                    timezone=params["timezone"]
+                )
+            
+            self.queue.put("\n--- All tasks completed! ---\n")
             else:
                 # Remote mode
                 self.queue.put("--- Starting remote SSH mode tasks ---\n")
@@ -533,7 +528,7 @@ class App(tk.Tk):
                     if params["cleanup_filenames"]:
                         self.queue.put("Scanning for problematic filenames...\n")
                         problematic_filenames = scan_problematic_filenames_remote(
-                            ssh_client, params["share_path"], params["problem_chars"], params["char_replacements"]
+                            ssh_client, params["share_path"], params["problem_chars"]
                         )
                         self.queue.put(f"Found {len(problematic_filenames)} files/directories with problematic characters.\n\n")
                     
@@ -597,8 +592,8 @@ class App(tk.Tk):
 
 if __name__ == "__main__":
     try:
-        app = App()
-        app.mainloop()
+    app = App()
+    app.mainloop()
     except Exception as e:
         print(f"Error starting GUI: {e}")
         import traceback
