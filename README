@@ -4,13 +4,35 @@ A Python tool for organizing and managing media files (photos and videos) by ext
 
 ## Features
 
+The tool operates in **two distinct modes**:
+
+### Local Mode (Direct File Operations)
 - **Rename Media Files**: Automatically rename photos and videos using timestamps extracted from EXIF metadata
 - **Find and Delete Duplicates**: Identify duplicate files using SHA256 checksums and remove them
 - **Flatten Directory Structure**: Move all files from subdirectories to the root folder
 - **Timezone Support**: Handle timezone conversion for files with GPS coordinates or specify a default timezone
-- **Both CLI and GUI**: Available as both command-line tool and graphical user interface
 - **Dry Run Mode**: Preview changes before actually modifying files
 - **Debug Mode**: Verbose output for troubleshooting
+
+### Remote SSH Mode (Script Generation)
+- **Connect via SSH to QNAP**: Uses key-based authentication to connect to QNAP devices
+- **Scan for Cleanup Issues**: Remotely scans for:
+  - Permission problems (wrong ownership, executable image files)
+  - Empty folders (excluding configurable patterns like `.fcpbundle`)
+  - Legacy files (Windows cache files: `Thumbs.db`, `ehthumbs.db`, `Desktop.ini`, `IconCache.db`)
+  - Legacy directories (`.@__thumb`, `.streams` folder at root)
+  - macOS resource fork files (`._*` files with matching non-prefixed files)
+  - Problematic filenames (characters like `:`, `~` that cause replication issues)
+- **Generate Categorized Scripts**: Creates organized bash scripts ready for QNAP SSH terminal:
+  - `permissions_to_fix.sh` - Permission fix commands
+  - `files_to_delete.sh` - Legacy file deletion commands
+  - `folders_to_delete.sh` - Empty folder cleanup (multiple passes)
+  - `files_to_rename.sh` - Filename sanitization commands
+  - `run_all.sh` - Master script to run all fixes in sequence
+- **Script Review**: Never executes changes directly - only generates scripts for user review and manual execution
+
+### Interface
+- **Both CLI and GUI**: Available as both command-line tool and graphical user interface
 
 ## How It Works
 
@@ -27,6 +49,8 @@ Files are renamed using the format: `YYYYMMDD_HHMMSS-original_name.extension`
 
 ### Command Line Interface
 
+#### Local Mode
+
 ```bash
 # Basic usage - rename files with dry run
 python main.py /path/to/photos --rename --dry-run
@@ -34,13 +58,57 @@ python main.py /path/to/photos --rename --dry-run
 # Full workflow with all features
 python main.py /path/to/photos --flatten --delete-dups --rename --timezone "Europe/Paris"
 
-# Available options:
+# Available local mode options:
 # --rename        Rename media files using metadata timestamps
 # --delete-dups   Find and delete duplicate files
 # --flatten       Move all files to root directory
 # --dry-run       Preview changes without modifying files
 # --debug         Verbose output
 # --timezone      Specify timezone for UTC conversion
+# --force-overwrite  Force overwrite existing timestamp prefixes
+```
+
+#### Remote SSH Mode
+
+```bash
+# Generate cleanup scripts for QNAP
+python main.py --remote-mode \
+  --ssh-host qnap.local \
+  --ssh-user admin \
+  --ssh-key ~/.ssh/qnap_key \
+  --share-path /share/Jinhwa/ \
+  --share-owner jinhwa \
+  --cleanup-all
+
+# Or select specific cleanup operations:
+python main.py --remote-mode \
+  --ssh-host qnap.local \
+  --ssh-user admin \
+  --ssh-key ~/.ssh/qnap_key \
+  --share-path /share/Jinhwa/ \
+  --share-owner jinhwa \
+  --cleanup-permissions \
+  --cleanup-empty-folders \
+  --cleanup-legacy-files \
+  --cleanup-filenames
+
+# Available remote mode options:
+# --remote-mode, --ssh-mode     Enable remote SSH mode
+# --ssh-host                     QNAP hostname or IP address
+# --ssh-user                     SSH username
+# --ssh-key                      Path to SSH private key file (required)
+# --ssh-port                     SSH port (default: 22)
+# --share-path                   Path to share root on QNAP
+# --share-owner                  Username of share owner
+# --cleanup-all                  Enable all cleanup scans
+# --cleanup-permissions          Scan for permission issues
+# --cleanup-empty-folders        Scan for empty folders
+# --cleanup-legacy-files         Scan for legacy files
+# --cleanup-filenames            Scan for problematic filenames
+# --problem-chars                Problematic characters (default: ": ~")
+# --char-replacements            Replacement characters (default: "- _")
+# --exclude-folder               Folders to exclude (default: ".fcpbundle")
+# --output-dir                   Output directory for scripts
 ```
 
 ### Graphical User Interface
@@ -50,11 +118,22 @@ python gui.py
 ```
 
 The GUI provides a user-friendly interface with:
+
+**Local Mode:**
 - Folder browser
-- Checkboxes for each action
+- Checkboxes for each action (rename, delete-dups, flatten)
 - Timezone selector
 - Command preview
 - Real-time output console
+- Settings persistence
+
+**Remote SSH Mode:**
+- SSH connection settings (host, user, key file, port)
+- Share path and owner configuration
+- Cleanup operation checkboxes
+- Problematic character configuration
+- Output directory selection
+- Script generation with categorized output
 - Settings persistence
 
 ## Development
@@ -90,3 +169,10 @@ The build process will:
 1. Install Python 3.12+ and required dependencies: `pip install -r requirements.txt`
 2. Build the app: `python setup.py bdist_mac`
 3. Find the app in `build/MediaTool.app` and the distribution zip in `build/`
+
+### Dependencies
+- PyExifTool
+- timezonefinder
+- tzdata
+- cx_Freeze (for building)
+- paramiko (for SSH connections in remote mode)

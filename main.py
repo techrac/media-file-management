@@ -467,30 +467,538 @@ def flatten_directory(folder_path: str, dry_run: bool = False):
 
     print("Flattening complete.")
 
+# ============================================================================
+# SSH-Based Remote Cleanup Functions
+# ============================================================================
+
+def connect_ssh(host: str, username: str, key_file: str, port: int = 22):
+    """
+    Establishes SSH connection using paramiko. Uses key-based authentication only.
+    
+    Args:
+        host: QNAP hostname or IP address
+        username: SSH username
+        key_file: Path to SSH private key file
+        port: SSH port (default: 22)
+    
+    Returns:
+        SSHClient instance
+    """
+    import paramiko
+    
+    if not os.path.exists(key_file):
+        raise Exception(f"SSH key file not found: {key_file}")
+    
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    
+    try:
+        ssh.connect(hostname=host, username=username, key_filename=key_file, port=port, timeout=30)
+        return ssh
+    except Exception as e:
+        raise Exception(f"Failed to connect via SSH: {e}") from e
+
+def execute_ssh_command(ssh_client, command: str):
+    """
+    Executes a remote command and returns stdout, stderr, and exit code.
+    
+    Args:
+        ssh_client: SSHClient instance
+        command: Command to execute
+    
+    Returns:
+        tuple: (stdout, stderr, exit_code)
+    """
+    try:
+        stdin, stdout, stderr = ssh_client.exec_command(command, timeout=300)
+        exit_code = stdout.channel.recv_exit_status()
+        stdout_text = stdout.read().decode('utf-8', errors='replace')
+        stderr_text = stderr.read().decode('utf-8', errors='replace')
+        return stdout_text, stderr_text, exit_code
+    except Exception as e:
+        raise Exception(f"Failed to execute SSH command: {e}") from e
+
+def disconnect_ssh(ssh_client):
+    """Closes SSH connection safely."""
+    try:
+        ssh_client.close()
+    except Exception:
+        pass
+
+def scan_permission_issues(ssh_client, share_path: str, username: str):
+    """
+    Scans for permission issues: wrong ownership and executable image files.
+    
+    Args:
+        ssh_client: SSHClient instance
+        share_path: Path to the share root
+        username: Username of the share owner
+    
+    Returns:
+        dict with keys: 'wrong_owner_files', 'wrong_owner_dirs', 'executable_images'
+    """
+    results = {
+        'wrong_owner_files': [],
+        'wrong_owner_dirs': [],
+        'executable_images': []
+    }
+    
+    # Find files with wrong ownership
+    cmd = f"find '{share_path}' -type f -not -user {username} 2>/dev/null"
+    stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
+    if stdout.strip():
+        results['wrong_owner_files'] = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
+    
+    # Find directories with wrong ownership
+    cmd = f"find '{share_path}' -type d -mindepth 1 -not -user {username} 2>/dev/null"
+    stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
+    if stdout.strip():
+        results['wrong_owner_dirs'] = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
+    
+    # Find executable image files
+    cmd = f"find '{share_path}' -type f \\( -perm -u=x -o -perm -g=x -o -perm -o=x \\) \\( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o -iname '*.bmp' -o -iname '*.tiff' \\) 2>/dev/null"
+    stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
+    if stdout.strip():
+        results['executable_images'] = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
+    
+    return results
+
+def scan_empty_folders_remote(ssh_client, share_path: str, exclude_patterns: list):
+    """
+    Scans for empty directories, excluding specified patterns.
+    
+    Args:
+        ssh_client: SSHClient instance
+        share_path: Path to the share root
+        exclude_patterns: List of folder names to exclude (e.g., ['.fcpbundle'])
+    
+    Returns:
+        List of empty folder paths (deepest first)
+    """
+    # Build exclude pattern for find command
+    exclude_args = ' '.join([f"-not -name '{pattern}'" for pattern in exclude_patterns])
+    
+    # Find empty directories
+    cmd = f"find '{share_path}' -type d -mindepth 1 {exclude_args} -exec sh -c 'if [ -z \"$(ls -A \"$1\" 2>/dev/null)\" ]; then echo \"$1\"; fi' sh {{}} \\; 2>/dev/null"
+    stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
+    
+    empty_folders = []
+    if stdout.strip():
+        empty_folders = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
+    
+    # Sort by path depth (deepest first) for safe deletion
+    empty_folders.sort(key=lambda x: x.count('/'), reverse=True)
+    
+    return empty_folders
+
+def scan_legacy_files_remote(ssh_client, share_path: str):
+    """
+    Scans for legacy files and directories to delete.
+    
+    Args:
+        ssh_client: SSHClient instance
+        share_path: Path to the share root
+    
+    Returns:
+        dict with keys: 'files', 'directories', 'resource_forks'
+    """
+    results = {
+        'files': [],
+        'directories': [],
+        'resource_forks': []
+    }
+    
+    # Windows cache files
+    cache_files = ['Thumbs.db', 'ehthumbs.db', 'ehthumbs_vista.db', 'Desktop.ini', 'IconCache.db']
+    for cache_file in cache_files:
+        cmd = f"find '{share_path}' -type f -name '{cache_file}' 2>/dev/null"
+        stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
+        if stdout.strip():
+            results['files'].extend([line.strip() for line in stdout.strip().split('\n') if line.strip()])
+    
+    # .@__thumb directories
+    cmd = f"find '{share_path}' -type d -name '.@__thumb' 2>/dev/null"
+    stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
+    if stdout.strip():
+        results['directories'].extend([line.strip() for line in stdout.strip().split('\n') if line.strip()])
+    
+    # .streams folder at root only
+    streams_path = share_path.rstrip('/') + '/.streams'
+    cmd = f"if [ -d '{streams_path}' ]; then echo '{streams_path}'; fi 2>/dev/null"
+    stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
+    if stdout.strip():
+        results['directories'].append(stdout.strip())
+    
+    # ._* resource fork files (only if matching non-prefixed file exists)
+    # Use a bash script to check both conditions in one pass
+    cmd = f"find '{share_path}' -type f -name '._*' 2>/dev/null | while read rf_file; do dir_path=$(dirname \"$rf_file\"); base_name=$(basename \"$rf_file\"); matching_name=\"${{base_name#._}}\"; if [ \"$matching_name\" != \"$base_name\" ]; then matching_path=\"$dir_path/$matching_name\"; if [ -f \"$matching_path\" ]; then echo \"$rf_file\"; fi; fi; done"
+    stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
+    if stdout.strip():
+        results['resource_forks'].extend([line.strip() for line in stdout.strip().split('\n') if line.strip()])
+    
+    return results
+
+def scan_problematic_filenames_remote(ssh_client, share_path: str, problem_chars: list, char_replacements: list):
+    """
+    Scans for files/directories containing problematic characters.
+    
+    Args:
+        ssh_client: SSHClient instance
+        share_path: Path to the share root
+        problem_chars: List of problematic characters (e.g., [':', '~'])
+        char_replacements: List of replacement characters (e.g., ['-', '_'])
+    
+    Returns:
+        List of tuples: (original_path, sanitized_path)
+    """
+    if len(problem_chars) != len(char_replacements):
+        raise ValueError("problem_chars and char_replacements must have the same length")
+    
+    # Build find pattern to match files/dirs with problematic characters
+    char_pattern = ' '.join([f"-o -name '*{char}*'" for char in problem_chars])
+    char_pattern = char_pattern[4:]  # Remove leading " -o "
+    
+    cmd = f"find '{share_path}' \\( -type f -o -type d \\) \\( {char_pattern} \\) 2>/dev/null"
+    stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
+    
+    rename_list = []
+    if stdout.strip():
+        paths = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
+        for path in paths:
+            sanitized = path
+            for prob_char, repl_char in zip(problem_chars, char_replacements):
+                sanitized = sanitized.replace(prob_char, repl_char)
+            if sanitized != path:
+                rename_list.append((path, sanitized))
+    
+    return rename_list
+
+def escape_shell_path(path: str) -> str:
+    """Escapes a path for safe use in shell commands."""
+    # Replace single quotes with '\''
+    escaped = path.replace("'", "'\\''")
+    return f"'{escaped}'"
+
+def generate_categorized_cleanup_scripts(
+    share_path: str,
+    username: str,
+    permission_issues: dict = None,
+    empty_folders: list = None,
+    legacy_files: dict = None,
+    problematic_filenames: list = None,
+    exclude_patterns: list = None,
+    output_dir: str = None
+):
+    """
+    Generates categorized bash script files for cleanup operations.
+    
+    Args:
+        share_path: Path to the share root
+        username: Username of the share owner
+        permission_issues: Dict from scan_permission_issues
+        empty_folders: List from scan_empty_folders_remote
+        legacy_files: Dict from scan_legacy_files_remote
+        problematic_filenames: List of tuples from scan_problematic_filenames_remote
+        exclude_patterns: List of folder names to exclude
+        output_dir: Directory to write scripts (default: timestamped directory in user's home/Documents)
+    """
+    if output_dir is None:
+        # Use Documents folder or home directory as default location (writable by user)
+        home_dir = os.path.expanduser("~")
+        documents_dir = os.path.join(home_dir, "Documents")
+        if os.path.exists(documents_dir) and os.access(documents_dir, os.W_OK):
+            base_dir = documents_dir
+        else:
+            base_dir = home_dir
+        output_dir = os.path.join(base_dir, f"qnap_cleanup_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    else:
+        # If user provided a relative path, make it absolute from home directory
+        if not os.path.isabs(output_dir):
+            home_dir = os.path.expanduser("~")
+            output_dir = os.path.join(home_dir, output_dir)
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    exclude_patterns = exclude_patterns or ['.fcpbundle']
+    
+    scripts_generated = []
+    
+    # 1. permissions_to_fix.sh
+    if permission_issues:
+        script_path = os.path.join(output_dir, 'permissions_to_fix.sh')
+        with open(script_path, 'w', encoding='utf-8') as f:
+            f.write("#!/bin/bash\n")
+            f.write(f"# Generated cleanup script for QNAP SSH terminal\n")
+            f.write(f"# Target path: {share_path}\n")
+            f.write(f"# Share owner: {username}\n")
+            f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            f.write("set -e  # Exit on error\n\n")
+            f.write("echo \"=== Fixing File Ownership ===\"\n")
+            f.write(f"sudo find {escape_shell_path(share_path)} -not -user {username} -exec chown {username}:everyone {{}} \\;\n")
+            f.write(f"sudo find {escape_shell_path(share_path)} -not -group everyone -exec chown {username}:everyone {{}} \\;\n\n")
+            f.write("echo \"=== Fixing Directory Permissions ===\"\n")
+            f.write(f"find {escape_shell_path(share_path)} -mindepth 1 -type d -exec chmod u+x {{}} \\;\n\n")
+            f.write("echo \"=== Removing Execute Permissions from Image Files ===\"\n")
+            f.write(f"sudo find {escape_shell_path(share_path)} -type f \\( -perm -u=x -o -perm -g=x -o -perm -o=x \\) \\\n")
+            f.write("  \\( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o -iname '*.bmp' -o -iname '*.tiff' \\) \\\n")
+            f.write("  -exec chmod -x {{}} \\;\n\n")
+            f.write("echo \"=== Permission fixes complete ===\"\n")
+        os.chmod(script_path, 0o755)
+        scripts_generated.append(script_path)
+    
+    # 2. files_to_delete.sh
+    if legacy_files and (legacy_files.get('files') or legacy_files.get('directories') or legacy_files.get('resource_forks')):
+        script_path = os.path.join(output_dir, 'files_to_delete.sh')
+        with open(script_path, 'w', encoding='utf-8') as f:
+            f.write("#!/bin/bash\n")
+            f.write(f"# Generated cleanup script for QNAP SSH terminal\n")
+            f.write(f"# Target path: {share_path}\n")
+            f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            f.write("set -e  # Exit on error\n\n")
+            
+            if legacy_files.get('files'):
+                f.write("echo \"=== Listing Windows cache files to delete ===\"\n")
+                for file_path in legacy_files['files']:
+                    f.write(f"# {file_path}\n")
+                f.write("\necho \"=== Deleting Windows cache files ===\"\n")
+                for file_path in legacy_files['files']:
+                    f.write(f"sudo rm -f {escape_shell_path(file_path)}\n")
+                f.write("\n")
+            
+            if legacy_files.get('directories'):
+                f.write("echo \"=== Listing directories to delete ===\"\n")
+                for dir_path in legacy_files['directories']:
+                    f.write(f"# {dir_path}\n")
+                f.write("\necho \"=== Deleting directories ===\"\n")
+                for dir_path in legacy_files['directories']:
+                    f.write(f"sudo rm -rf {escape_shell_path(dir_path)}\n")
+                f.write("\n")
+            
+            if legacy_files.get('resource_forks'):
+                f.write("echo \"=== Listing macOS resource fork files to delete ===\"\n")
+                for file_path in legacy_files['resource_forks']:
+                    f.write(f"# {file_path}\n")
+                f.write("\necho \"=== Deleting macOS resource fork files ===\"\n")
+                for file_path in legacy_files['resource_forks']:
+                    f.write(f"sudo rm -f {escape_shell_path(file_path)}\n")
+                f.write("\n")
+            
+            f.write("echo \"=== Legacy files deletion complete ===\"\n")
+        os.chmod(script_path, 0o755)
+        scripts_generated.append(script_path)
+    
+    # 3. folders_to_delete.sh
+    if empty_folders:
+        script_path = os.path.join(output_dir, 'folders_to_delete.sh')
+        with open(script_path, 'w', encoding='utf-8') as f:
+            f.write("#!/bin/bash\n")
+            f.write(f"# Generated cleanup script for QNAP SSH terminal\n")
+            f.write(f"# Target path: {share_path}\n")
+            f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            f.write("set -e  # Exit on error\n\n")
+            f.write("echo \"=== Listing empty folders ===\"\n")
+            exclude_args = ' '.join([f"-not -name '{pattern}'" for pattern in exclude_patterns])
+            f.write(f"find {escape_shell_path(share_path)} -type d -mindepth 1 {exclude_args} -exec sh -c 'if [ -z \"$(ls -A \"$1\" 2>/dev/null)\" ]; then echo \"$1\"; fi' sh {{}} \\;\n\n")
+            f.write("echo \"=== Deleting empty folders (multiple passes) ===\"\n")
+            f.write("MAX_PASSES=10\n")
+            f.write("for i in $(seq 1 $MAX_PASSES); do\n")
+            exclude_args_rmdir = ' '.join([f"-not -name '{pattern}'" for pattern in exclude_patterns])
+            f.write(f"  COUNT=$(find {escape_shell_path(share_path)} -type d -mindepth 1 {exclude_args_rmdir} -exec rmdir {{}} \\; 2>/dev/null | wc -l || echo 0)\n")
+            f.write("  if [ $COUNT -eq 0 ]; then\n")
+            f.write("    echo \"No more empty folders found after pass $i\"\n")
+            f.write("    break\n")
+            f.write("  fi\n")
+            f.write("  echo \"Pass $i: Removed empty folders\"\n")
+            f.write("done\n\n")
+            f.write("echo \"=== Empty folder cleanup complete ===\"\n")
+        os.chmod(script_path, 0o755)
+        scripts_generated.append(script_path)
+    
+    # 4. files_to_rename.sh
+    if problematic_filenames:
+        script_path = os.path.join(output_dir, 'files_to_rename.sh')
+        with open(script_path, 'w', encoding='utf-8') as f:
+            f.write("#!/bin/bash\n")
+            f.write(f"# Generated cleanup script for QNAP SSH terminal\n")
+            f.write(f"# Target path: {share_path}\n")
+            f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            f.write("set -e  # Exit on error\n\n")
+            f.write("echo \"=== Listing files/directories to rename ===\"\n")
+            for orig_path, new_path in problematic_filenames:
+                f.write(f"# {orig_path} -> {new_path}\n")
+            f.write("\necho \"=== Renaming files/directories ===\"\n")
+            for orig_path, new_path in problematic_filenames:
+                f.write(f"sudo mv {escape_shell_path(orig_path)} {escape_shell_path(new_path)}\n")
+            f.write("\necho \"=== Filename sanitization complete ===\"\n")
+        os.chmod(script_path, 0o755)
+        scripts_generated.append(script_path)
+    
+    # 5. run_all.sh - Master script
+    if scripts_generated:
+        script_path = os.path.join(output_dir, 'run_all.sh')
+        with open(script_path, 'w', encoding='utf-8') as f:
+            f.write("#!/bin/bash\n")
+            f.write(f"# Master cleanup script for QNAP SSH terminal\n")
+            f.write(f"# Target path: {share_path}\n")
+            f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            f.write("set -e  # Exit on error\n\n")
+            f.write("SCRIPT_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")\" && pwd)\"\n\n")
+            f.write("echo \"=== Starting QNAP Cleanup Scripts ===\"\n\n")
+            
+            # Execute scripts in order
+            if permission_issues and os.path.exists(os.path.join(output_dir, 'permissions_to_fix.sh')):
+                f.write("echo \"\\n[1/4] Running permission fixes...\"\n")
+                f.write("bash \"$SCRIPT_DIR/permissions_to_fix.sh\"\n\n")
+            
+            if problematic_filenames and os.path.exists(os.path.join(output_dir, 'files_to_rename.sh')):
+                f.write("echo \"\\n[2/4] Running filename sanitization...\"\n")
+                f.write("bash \"$SCRIPT_DIR/files_to_rename.sh\"\n\n")
+            
+            if legacy_files and os.path.exists(os.path.join(output_dir, 'files_to_delete.sh')):
+                f.write("echo \"\\n[3/4] Deleting legacy files...\"\n")
+                f.write("bash \"$SCRIPT_DIR/files_to_delete.sh\"\n\n")
+            
+            if empty_folders and os.path.exists(os.path.join(output_dir, 'folders_to_delete.sh')):
+                f.write("echo \"\\n[4/4] Deleting empty folders...\"\n")
+                f.write("bash \"$SCRIPT_DIR/folders_to_delete.sh\"\n\n")
+            
+            f.write("echo \"\\n=== All cleanup operations complete ===\"\n")
+        os.chmod(script_path, 0o755)
+        scripts_generated.append(script_path)
+    
+    return output_dir, scripts_generated
+
 def main():
     try:
         parser = argparse.ArgumentParser(
-            description="Tool to organize media files.",
-            epilog="Example: python main.py /path/to/photos --rename --debug"
+            description="Tool to organize media files (local mode) or generate cleanup scripts for QNAP (remote mode).",
+            epilog="Local mode example: python main.py /path/to/photos --rename --debug\n"
+                   "Remote mode example: python main.py --remote-mode --ssh-host qnap.local --ssh-user admin --ssh-key ~/.ssh/qnap_key --share-path /share/Jinhwa/ --share-owner jinhwa --cleanup-all"
         )
-        parser.add_argument("folder_path", help="The path to the folder containing the media files.")
+        
+        # Mode selection
+        parser.add_argument("--remote-mode", "--ssh-mode", action="store_true", 
+                          help="Enable remote SSH mode (script generation only). If not specified, uses local mode.")
+        
+        # Local mode arguments
+        parser.add_argument("folder_path", nargs='?', help="The path to the folder containing the media files (local mode only).")
         parser.add_argument("--debug", action="store_true", help="More verbose.")
-        parser.add_argument("--dry-run", action="store_true", help="No file modification / deletion is done.")
-        parser.add_argument("--rename", action="store_true", help="Rename media files using their metadata timestamp.")
-        parser.add_argument("--delete-dups", action="store_true", help="Find duplicate files in the folder based on checksum.")
-        parser.add_argument("--flatten", action="store_true", help="Move all files from subdirectories to the root folder and remove empty subdirectories.")
-        parser.add_argument("--timezone", help="Specify a timezone (e.g., 'Europe/Paris') to use for UTC conversion when GPS data is missing.")
-        parser.add_argument("--force-overwrite", action="store_true", help="Force overwrite existing timestamp prefixes in filenames (useful for correcting files processed with wrong timezone).")
+        parser.add_argument("--dry-run", action="store_true", help="No file modification / deletion is done (local mode only).")
+        parser.add_argument("--rename", action="store_true", help="Rename media files using their metadata timestamp (local mode only).")
+        parser.add_argument("--delete-dups", action="store_true", help="Find duplicate files in the folder based on checksum (local mode only).")
+        parser.add_argument("--flatten", action="store_true", help="Move all files from subdirectories to the root folder and remove empty subdirectories (local mode only).")
+        parser.add_argument("--timezone", help="Specify a timezone (e.g., 'Europe/Paris') to use for UTC conversion when GPS data is missing (local mode only).")
+        parser.add_argument("--force-overwrite", action="store_true", help="Force overwrite existing timestamp prefixes in filenames (local mode only).")
+        
+        # Remote mode arguments
+        parser.add_argument("--ssh-host", help="QNAP hostname or IP address (remote mode required).")
+        parser.add_argument("--ssh-user", help="SSH username (remote mode required).")
+        parser.add_argument("--ssh-key", help="Path to SSH private key file (remote mode required).")
+        parser.add_argument("--ssh-port", type=int, default=22, help="SSH port (default: 22).")
+        parser.add_argument("--share-path", help="Path to the share root on QNAP (e.g., /share/Jinhwa/) (remote mode required).")
+        parser.add_argument("--share-owner", help="Username of the share owner (e.g., jinhwa) (remote mode required).")
+        parser.add_argument("--cleanup-all", action="store_true", help="Enable all cleanup scans (permissions, empty folders, legacy files, filename fixes).")
+        parser.add_argument("--cleanup-permissions", action="store_true", help="Enable permission fix scanning.")
+        parser.add_argument("--cleanup-empty-folders", action="store_true", help="Enable empty folder cleanup scan.")
+        parser.add_argument("--cleanup-legacy-files", action="store_true", help="Enable legacy file cleanup scan (includes Windows cache files, .streams, ._* resource fork files).")
+        parser.add_argument("--cleanup-filenames", action="store_true", help="Enable filename character replacement scan.")
+        parser.add_argument("--problem-chars", default=": ~", help="Comma-separated list of problematic characters to replace (default: ': ~').")
+        parser.add_argument("--char-replacements", default="- _", help="Comma-separated list of replacement characters (default: '- _' - must match order of problem-chars).")
+        parser.add_argument("--exclude-folder", default=".fcpbundle", help="Comma-separated list of folder names to exclude from empty folder cleanup (default: '.fcpbundle').")
+        parser.add_argument("--output-dir", help="Directory for generated scripts (default: qnap_cleanup_YYYYMMDD_HHMMSS/).")
+        
         args = parser.parse_args()
 
-        if args.flatten:
-            flatten_directory(folder_path=args.folder_path, dry_run=args.dry_run)
-
-        if args.delete_dups:
-            process_duplicate_files(folder_path= args.folder_path, dry_run=args.dry_run, debug=args.debug)
+        # Route to appropriate mode
+        if args.remote_mode:
+            # Remote SSH mode
+            if not args.ssh_host or not args.ssh_user or not args.ssh_key or not args.share_path or not args.share_owner:
+                parser.error("Remote mode requires: --ssh-host, --ssh-user, --ssh-key, --share-path, and --share-owner")
             
-        if args.rename:
-            rename_media(folder_path= args.folder_path, timezone=args.timezone, dry_run=args.dry_run, debug=args.debug, force_overwrite=args.force_overwrite)
+            # Determine which cleanup operations to perform
+            do_permissions = args.cleanup_all or args.cleanup_permissions
+            do_empty_folders = args.cleanup_all or args.cleanup_empty_folders
+            do_legacy_files = args.cleanup_all or args.cleanup_legacy_files
+            do_filenames = args.cleanup_all or args.cleanup_filenames
+            
+            if not (do_permissions or do_empty_folders or do_legacy_files or do_filenames):
+                parser.error("Remote mode requires at least one cleanup operation (use --cleanup-all or specific --cleanup-* flags)")
+            
+            # Parse problem chars and replacements
+            problem_chars = [c.strip() for c in args.problem_chars.split(',')]
+            char_replacements = [c.strip() for c in args.char_replacements.split(',')]
+            if len(problem_chars) != len(char_replacements):
+                parser.error("--problem-chars and --char-replacements must have the same number of items")
+            
+            exclude_patterns = [p.strip() for p in args.exclude_folder.split(',')]
+            
+            print(f"Connecting to {args.ssh_host}...")
+            ssh_client = connect_ssh(args.ssh_host, args.ssh_user, args.ssh_key, args.ssh_port)
+            print("Connected successfully.\n")
+            
+            try:
+                permission_issues = None
+                empty_folders = None
+                legacy_files = None
+                problematic_filenames = None
+                
+                if do_permissions:
+                    print("Scanning for permission issues...")
+                    permission_issues = scan_permission_issues(ssh_client, args.share_path, args.share_owner)
+                    print(f"Found {len(permission_issues['wrong_owner_files'])} files and {len(permission_issues['wrong_owner_dirs'])} directories with wrong ownership.")
+                    print(f"Found {len(permission_issues['executable_images'])} executable image files.\n")
+                
+                if do_empty_folders:
+                    print("Scanning for empty folders...")
+                    empty_folders = scan_empty_folders_remote(ssh_client, args.share_path, exclude_patterns)
+                    print(f"Found {len(empty_folders)} empty folders.\n")
+                
+                if do_legacy_files:
+                    print("Scanning for legacy files...")
+                    legacy_files = scan_legacy_files_remote(ssh_client, args.share_path)
+                    total_legacy = len(legacy_files.get('files', [])) + len(legacy_files.get('directories', [])) + len(legacy_files.get('resource_forks', []))
+                    print(f"Found {total_legacy} legacy items to delete ({len(legacy_files.get('files', []))} files, {len(legacy_files.get('directories', []))} directories, {len(legacy_files.get('resource_forks', []))} resource forks).\n")
+                
+                if do_filenames:
+                    print("Scanning for problematic filenames...")
+                    problematic_filenames = scan_problematic_filenames_remote(ssh_client, args.share_path, problem_chars, char_replacements)
+                    print(f"Found {len(problematic_filenames)} files/directories with problematic characters.\n")
+                
+                print("Generating cleanup scripts...")
+                output_dir, scripts = generate_categorized_cleanup_scripts(
+                    share_path=args.share_path,
+                    username=args.share_owner,
+                    permission_issues=permission_issues,
+                    empty_folders=empty_folders,
+                    legacy_files=legacy_files,
+                    problematic_filenames=problematic_filenames,
+                    exclude_patterns=exclude_patterns,
+                    output_dir=args.output_dir
+                )
+                
+                print(f"\n=== Scripts generated successfully ===")
+                print(f"Output directory: {os.path.abspath(output_dir)}")
+                print(f"Scripts generated: {len(scripts)}")
+                for script in scripts:
+                    print(f"  - {os.path.basename(script)}")
+                print(f"\nReview the scripts and run them on your QNAP SSH terminal.")
+                print(f"To run all scripts: bash {os.path.join(output_dir, 'run_all.sh')}")
+                
+            finally:
+                disconnect_ssh(ssh_client)
+        else:
+            # Local mode
+            if not args.folder_path:
+                parser.error("Local mode requires folder_path argument")
+            
+            if args.flatten:
+                flatten_directory(folder_path=args.folder_path, dry_run=args.dry_run)
+
+            if args.delete_dups:
+                process_duplicate_files(folder_path= args.folder_path, dry_run=args.dry_run, debug=args.debug)
+                
+            if args.rename:
+                rename_media(folder_path= args.folder_path, timezone=args.timezone, dry_run=args.dry_run, debug=args.debug, force_overwrite=args.force_overwrite)
 
     except Exception as ex:
          print('=== FATAL ERROR')

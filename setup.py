@@ -66,7 +66,7 @@ except Exception as e:
 include_files = [f for f in [exiftool_include, exiftool_lib_include, tz_include, tzdata_include] if f is not None]
 
 # Packages that cx_Freeze might miss.
-packages = ["tkinter", "numpy", "exiftool", "zoneinfo", "main"]
+packages = ["tkinter", "numpy", "exiftool", "zoneinfo", "main", "paramiko"]
 
 build_exe_options = {
     "packages": packages,
