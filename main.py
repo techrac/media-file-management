@@ -571,21 +571,37 @@ def scan_empty_folders_remote(ssh_client, share_path: str, exclude_patterns: lis
         exclude_patterns: List of folder name patterns to exclude (e.g., ['*.fcpbundle'] for folders ending with .fcpbundle)
     
     Returns:
-        List of empty folder paths (deepest first)
+        List of tuples: (parent_dir, inode, path) - deepest first
+        Using inode ensures we can handle non-UTF-8 folder names
     """
+    import os.path
+    
     # Build exclude pattern for find command (supports wildcards like *.fcpbundle)
     exclude_args = ' '.join([f"-not -name '{pattern}'" for pattern in exclude_patterns])
     
-    # Find empty directories
-    cmd = f"find '{share_path}' -type d -mindepth 1 {exclude_args} -exec sh -c 'if [ -z \"$(ls -A \"$1\" 2>/dev/null)\" ]; then echo \"$1\"; fi' sh {{}} \\; 2>/dev/null"
+    # Find empty directories and get their inodes
+    # Format: inode|parent_dir|path
+    cmd = f"find '{share_path}' -type d -mindepth 1 {exclude_args} -exec sh -c 'if [ -z \"$(ls -A \"$1\" 2>/dev/null)\" ]; then echo \"$(stat -c %i \"$1\" 2>/dev/null)|$(dirname \"$1\")|$1\"; fi' sh {{}} \\; 2>/dev/null"
     stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
     
     empty_folders = []
     if stdout.strip():
-        empty_folders = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
+        for line in stdout.strip().split('\n'):
+            if not line.strip():
+                continue
+            try:
+                parts = line.strip().split('|', 2)
+                if len(parts) == 3:
+                    inode_str, parent_dir, path = parts
+                    inode = int(inode_str) if inode_str.isdigit() else None
+                    if inode:
+                        empty_folders.append((parent_dir, inode, path))
+            except (ValueError, IndexError):
+                # Skip malformed lines
+                continue
     
     # Sort by path depth (deepest first) for safe deletion
-    empty_folders.sort(key=lambda x: x.count('/'), reverse=True)
+    empty_folders.sort(key=lambda x: x[2].count('/'), reverse=True)
     
     return empty_folders
 
@@ -664,13 +680,13 @@ def scan_bad_encoding_filenames_remote(ssh_client, share_path: str):
         share_path: Path to the share root
     
     Returns:
-        List of tuples: (original_path, sanitized_path)
-        Where sanitized_path has the filename replaced with a UTF-8 safe version
+        List of tuples: (parent_dir, inode, original_path, sanitized_path)
+        Using inode ensures we can handle non-UTF-8 filenames
     """
     import os.path
     import hashlib
     
-    # Create a Python script to detect bad encoding filenames
+    # Create a Python script to detect bad encoding filenames and get inodes
     # This matches the user's example - checking if names can be decoded as UTF-8
     # We need to work with raw bytes from the filesystem by passing bytes path to os.walk
     share_path_bytes = share_path.encode('utf-8')
@@ -690,10 +706,23 @@ for dirpath, dirnames, filenames in os.walk(root):
             name.decode("utf-8", "strict")
         except UnicodeDecodeError:
             full = os.path.join(dirpath, name)
-            bad.append(full.decode("utf-8", "backslashreplace"))
-
-for f in bad:
-    print(f)
+            # Initialize variables
+            inode = 0
+            parent_dir = ""
+            path_str = ""
+            try:
+                # Get inode number
+                stat_info = os.stat(full)
+                inode = stat_info.st_ino
+                parent_dir = dirpath.decode("utf-8", "backslashreplace") if isinstance(dirpath, bytes) else dirpath
+                path_str = full.decode("utf-8", "backslashreplace")
+            except:
+                # Fallback if stat fails
+                path_str = full.decode("utf-8", "backslashreplace")
+                parent_dir = dirpath.decode("utf-8", "backslashreplace") if isinstance(dirpath, bytes) else str(dirpath)
+                inode = 0
+            # Output: inode|parent_dir|path
+            print(f"{inode}|{parent_dir}|{path_str}")
 '''
     
     # Execute the Python script on the remote side
@@ -707,33 +736,64 @@ for f in bad:
     
     rename_list = []
     if stdout.strip():
-        paths = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
-        for path in paths:
-            # Split path into directory and basename
-            dir_name = os.path.dirname(path)
-            basename = os.path.basename(path)
-            
-            # Create a sanitized basename using a hash of the original
-            # This ensures uniqueness while being readable
+        for line in stdout.strip().split('\n'):
+            if not line.strip():
+                continue
             try:
-                basename_bytes = basename.encode('utf-8', errors='replace')
-                basename_hash = hashlib.md5(basename_bytes).hexdigest()[:8]
-                sanitized_basename = f"bad_encoding_{basename_hash}"
-            except:
-                sanitized_basename = "bad_encoding_file"
-            
-            # Also sanitize to remove any illegal chars that might be present
-            sanitized_basename = sanitize_filename(sanitized_basename)
-            
-            # Reconstruct the full path
-            if dir_name and dir_name != '.':
-                sanitized = os.path.join(dir_name, sanitized_basename)
-            else:
-                sanitized = sanitized_basename
-            
-            # Only add to rename list if something changed
-            if sanitized != path:
-                rename_list.append((path, sanitized))
+                parts = line.strip().split('|', 2)
+                if len(parts) == 3:
+                    inode_str, dir_name, path = parts
+                    inode = int(inode_str) if inode_str != '0' else None
+                else:
+                    # Fallback format
+                    path = parts[0] if parts else line.strip()
+                    dir_name = os.path.dirname(path)
+                    inode = None
+                
+                # If we don't have inode, try to get it using find
+                if inode is None or inode == 0:
+                    # Try to get inode using find with the parent directory
+                    cmd = f"find '{dir_name}' -maxdepth 1 -name '*' -exec sh -c 'for f; do if [ \"$(stat -c %i \"$f\" 2>/dev/null)\" ]; then echo \"$(stat -c %i \"$f\" 2>/dev/null)|$f\"; fi; done' _ {{}} \\; 2>/dev/null | grep -F '{path}' | head -1"
+                    stdout2, stderr2, exit_code2 = execute_ssh_command(ssh_client, cmd)
+                    if stdout2.strip():
+                        try:
+                            inode_str, _ = stdout2.strip().split('|', 1)
+                            inode = int(inode_str)
+                        except:
+                            pass
+                
+                if inode is None or inode == 0:
+                    continue  # Skip if we can't get inode
+                
+                # Split path into directory and basename
+                if not dir_name:
+                    dir_name = os.path.dirname(path)
+                basename = os.path.basename(path)
+                
+                # Create a sanitized basename using a hash of the original
+                # This ensures uniqueness while being readable
+                try:
+                    basename_bytes = basename.encode('utf-8', errors='replace')
+                    basename_hash = hashlib.md5(basename_bytes).hexdigest()[:8]
+                    sanitized_basename = f"bad_encoding_{basename_hash}"
+                except:
+                    sanitized_basename = "bad_encoding_file"
+                
+                # Also sanitize to remove any illegal chars that might be present
+                sanitized_basename = sanitize_filename(sanitized_basename)
+                
+                # Reconstruct the full path
+                if dir_name and dir_name != '.':
+                    sanitized = os.path.join(dir_name, sanitized_basename)
+                else:
+                    sanitized = sanitized_basename
+                
+                # Only add to rename list if something changed
+                if sanitized != path:
+                    rename_list.append((dir_name, inode, path, sanitized))
+            except (ValueError, IndexError) as e:
+                # Skip malformed lines
+                continue
     
     return rename_list
 
@@ -747,7 +807,8 @@ def scan_problematic_filenames_remote(ssh_client, share_path: str):
         share_path: Path to the share root
     
     Returns:
-        List of tuples: (original_path, sanitized_path)
+        List of tuples: (parent_dir, inode, original_path, sanitized_path)
+        Using inode ensures we can handle non-UTF-8 filenames
     """
     import os.path
     
@@ -755,47 +816,55 @@ def scan_problematic_filenames_remote(ssh_client, share_path: str):
     
     # 1. Scan for illegal characters and spaces
     # Build find pattern to match files/dirs with illegal characters or spaces
+    # Use -printf to get inode, parent directory, and filename
     char_pattern = ' '.join([f"-o -name '*{char}*'" for char in ILLEGAL_FILENAME_CHARS])
     char_pattern = char_pattern[4:]  # Remove leading " -o "
     
     # Also find files/dirs with leading or trailing spaces in the name
     # Use -mindepth 1 to exclude the root directory itself
-    cmd = f"find '{share_path}' -mindepth 1 \\( -type f -o -type d \\) \\( {char_pattern} -o -name ' *' -o -name '* ' \\) 2>/dev/null"
+    # Format: inode|parent_dir|basename
+    cmd = f"find '{share_path}' -mindepth 1 \\( -type f -o -type d \\) \\( {char_pattern} -o -name ' *' -o -name '* ' \\) -printf '%i|%h|%f\\n' 2>/dev/null"
     stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
     
     if stdout.strip():
-        paths = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
-        for path in paths:
-            # Split path into directory and basename
-            dir_name = os.path.dirname(path)
-            basename = os.path.basename(path)
-            
-            # Sanitize the basename
-            sanitized_basename = sanitize_filename(basename)
-            
-            # Skip if basename becomes empty after sanitization
-            if not sanitized_basename:
+        for line in stdout.strip().split('\n'):
+            if not line.strip():
                 continue
-            
-            # Reconstruct the full path
-            if dir_name and dir_name != '.':
-                sanitized = os.path.join(dir_name, sanitized_basename)
-            else:
-                sanitized = sanitized_basename
-            
-            # Only add to rename list if something changed
-            if sanitized != path:
-                rename_list.append((path, sanitized))
+            try:
+                inode_str, dir_name, basename = line.strip().split('|', 2)
+                inode = int(inode_str)
+                
+                # Sanitize the basename
+                sanitized_basename = sanitize_filename(basename)
+                
+                # Skip if basename becomes empty after sanitization
+                if not sanitized_basename:
+                    continue
+                
+                # Reconstruct the full path for reference
+                if dir_name and dir_name != '.':
+                    original_path = os.path.join(dir_name, basename)
+                    sanitized_path = os.path.join(dir_name, sanitized_basename)
+                else:
+                    original_path = basename
+                    sanitized_path = sanitized_basename
+                
+                # Only add to rename list if something changed
+                if sanitized_path != original_path:
+                    rename_list.append((dir_name, inode, original_path, sanitized_path))
+            except (ValueError, IndexError):
+                # Skip malformed lines
+                continue
     
     # 2. Scan for bad encoding (non-UTF-8 filenames)
     bad_encoding_list = scan_bad_encoding_filenames_remote(ssh_client, share_path)
     
-    # Merge the two lists, avoiding duplicates
-    existing_paths = {orig for orig, _ in rename_list}
-    for orig_path, sanitized_path in bad_encoding_list:
-        if orig_path not in existing_paths:
-            rename_list.append((orig_path, sanitized_path))
-            existing_paths.add(orig_path)
+    # Merge the two lists, avoiding duplicates by inode
+    existing_inodes = {(dir_name, inode) for dir_name, inode, _, _ in rename_list}
+    for dir_name, inode, orig_path, sanitized_path in bad_encoding_list:
+        if (dir_name, inode) not in existing_inodes:
+            rename_list.append((dir_name, inode, orig_path, sanitized_path))
+            existing_inodes.add((dir_name, inode))
     
     return rename_list
 
@@ -925,13 +994,14 @@ def generate_categorized_cleanup_scripts(
             f.write(f"# Generated cleanup script for QNAP SSH terminal\n")
             f.write(f"# Target path: {share_path}\n")
             f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            f.write("echo \"=== Listing empty folders to delete ===\"\n")
-            for folder_path in empty_folders:
-                f.write(f"# {folder_path}\n")
-            f.write("\necho \"=== Deleting empty folders ===\"\n")
-            # Write explicit rmdir commands for each folder (sorted deepest first for safe deletion)
-            for folder_path in empty_folders:
-                f.write(f"rmdir {escape_shell_path(folder_path)} || echo \"Warning: Could not remove {folder_path} (may no longer be empty)\"\n")
+            f.write("echo \"=== Deleting empty folders ===\"\n")
+            # Write inode-based rmdir commands for each folder (sorted deepest first for safe deletion)
+            # Format: (parent_dir, inode, path)
+            for parent_dir, inode, folder_path in empty_folders:
+                # Use find with inode to locate and delete the folder
+                # This works even with non-UTF-8 folder names
+                f.write(f"# Deleting: {folder_path} (inode: {inode})\n")
+                f.write(f"find {escape_shell_path(parent_dir)} -maxdepth 1 -inum {inode} -type d -exec rmdir {{}} \\; 2>/dev/null || echo \"Warning: Could not remove folder (inode {inode}, may no longer be empty)\"\n")
             f.write("\necho \"=== Empty folder cleanup complete ===\"\n")
         os.chmod(script_path, 0o755)
         scripts_generated.append(script_path)
@@ -946,11 +1016,19 @@ def generate_categorized_cleanup_scripts(
             f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             f.write("set -e  # Exit on error\n\n")
             f.write("echo \"=== Listing files/directories to rename ===\"\n")
-            for orig_path, new_path in problematic_filenames:
-                f.write(f"# {orig_path} -> {new_path}\n")
+            # Format: (parent_dir, inode, original_path, sanitized_path)
+            for parent_dir, inode, orig_path, new_path in problematic_filenames:
+                f.write(f"# {orig_path} -> {new_path} (inode: {inode})\n")
             f.write("\necho \"=== Renaming files/directories ===\"\n")
-            for orig_path, new_path in problematic_filenames:
-                f.write(f"sudo mv {escape_shell_path(orig_path)} {escape_shell_path(new_path)}\n")
+            for parent_dir, inode, orig_path, new_path in problematic_filenames:
+                # Extract just the new basename
+                new_basename = os.path.basename(new_path)
+                # Construct the full new path
+                new_full_path = os.path.join(parent_dir, new_basename) if parent_dir and parent_dir != '.' else new_basename
+                # Use find with inode to locate the file/directory, then rename it
+                # This works even with non-UTF-8 filenames
+                f.write(f"# Renaming: {orig_path} -> {new_path}\n")
+                f.write(f"find {escape_shell_path(parent_dir)} -maxdepth 1 -inum {inode} -exec sh -c 'mv \"$1\" {escape_shell_path(new_full_path)}' _ {{}} \\; 2>/dev/null || echo \"Warning: Could not rename (inode {inode})\"\n")
             f.write("\necho \"=== Filename sanitization complete ===\"\n")
         os.chmod(script_path, 0o755)
         scripts_generated.append(script_path)
