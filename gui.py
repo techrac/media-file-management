@@ -64,18 +64,22 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"Media Organization Tool v{__version__}")
-        self.geometry("800x600")
-
+        
         self.config_file = os.path.join(os.path.expanduser("~"), ".media_tool_gui.json")
         self.queue = queue.Queue()
         self.thread = None
 
+        # Load window geometry before creating widgets
+        self.load_window_geometry()
+        
         self.create_widgets()
         self.load_settings()
         self.on_mode_changed()  # Initialize UI based on loaded mode
         self.process_queue()
         self.update_command_preview()
 
+        # Bind to window resize events to save geometry
+        self.bind('<Configure>', self.on_window_configure)
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def create_widgets(self):
@@ -179,17 +183,17 @@ class App(tk.Tk):
         # --- Remote Mode: Cleanup Options ---
         self.remote_cleanup_frame = ttk.LabelFrame(self, text="Cleanup Options", padding="10")
         
-        self.cleanup_permissions_var = tk.BooleanVar()
+        self.cleanup_permissions_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(self.remote_cleanup_frame, text="Fix permissions", variable=self.cleanup_permissions_var).pack(anchor=tk.W)
         
-        self.cleanup_empty_folders_var = tk.BooleanVar()
-        ttk.Checkbutton(self.remote_cleanup_frame, text="Delete empty folders", variable=self.cleanup_empty_folders_var).pack(anchor=tk.W)
+        self.cleanup_filenames_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self.remote_cleanup_frame, text="Rename problematic filenames (illegal characters and bad encoding)", variable=self.cleanup_filenames_var).pack(anchor=tk.W)
         
-        self.cleanup_legacy_files_var = tk.BooleanVar()
+        self.cleanup_legacy_files_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(self.remote_cleanup_frame, text="Delete legacy files (Windows cache: Thumbs.db, ehthumbs.db, Desktop.ini, IconCache.db; .streams, .@__thumb, ._* resource forks)", variable=self.cleanup_legacy_files_var).pack(anchor=tk.W)
         
-        self.cleanup_filenames_var = tk.BooleanVar()
-        ttk.Checkbutton(self.remote_cleanup_frame, text="Rename problematic filenames (illegal characters and bad encoding)", variable=self.cleanup_filenames_var).pack(anchor=tk.W)
+        self.cleanup_empty_folders_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self.remote_cleanup_frame, text="Delete empty folders", variable=self.cleanup_empty_folders_var).pack(anchor=tk.W)
         
         ttk.Label(self.remote_cleanup_frame, text="Exclude folders:").pack(anchor=tk.W, pady=(10, 0))
         self.exclude_folder_var = tk.StringVar(value=".fcpbundle")
@@ -266,6 +270,23 @@ class App(tk.Tk):
         if key_selected:
             self.ssh_key_var.set(key_selected)
 
+    def load_window_geometry(self):
+        """Loads the window geometry from the config file."""
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r') as f:
+                    config = json.load(f)
+                    geometry = config.get("window_geometry")
+                    if geometry:
+                        self.geometry(geometry)
+                    else:
+                        self.geometry("800x600")
+            else:
+                self.geometry("800x600")
+        except (IOError, json.JSONDecodeError):
+            # If we can't load, use default
+            self.geometry("800x600")
+    
     def load_settings(self):
         """Loads the last used settings from the config file."""
         try:
@@ -310,12 +331,20 @@ class App(tk.Tk):
             "ssh_port": self.ssh_port_var.get(),
             "share_path": self.share_path_var.get(),
             "share_owner": self.share_owner_var.get(),
+            "window_geometry": self.geometry(),
         }
         try:
             with open(self.config_file, 'w') as f:
                 json.dump(config, f, indent=4)
         except IOError as e:
             print(f"Could not save settings to {self.config_file}: {e}")
+    
+    def on_window_configure(self, event):
+        """Called when the window is resized or moved. Saves the geometry."""
+        # Only save if this is the main window (not a child widget)
+        if event.widget == self:
+            # Use after_idle to avoid saving too frequently during resize
+            self.after_idle(self.save_settings)
 
     def copy_output_to_clipboard(self):
         """Copies the content of the output console to the clipboard."""
@@ -495,10 +524,12 @@ class App(tk.Tk):
                         permission_issues = scan_permission_issues(ssh_client, params["share_path"], params["share_owner"])
                         self.queue.put(f"Found {len(permission_issues['wrong_owner_files'])} files and {len(permission_issues['wrong_owner_dirs'])} directories with wrong ownership.\n\n")
                     
-                    if params["cleanup_empty_folders"]:
-                        self.queue.put("Scanning for empty folders...\n")
-                        empty_folders = scan_empty_folders_remote(ssh_client, params["share_path"], params["exclude_folder"])
-                        self.queue.put(f"Found {len(empty_folders)} empty folders.\n\n")
+                    if params["cleanup_filenames"]:
+                        self.queue.put("Scanning for problematic filenames (illegal characters and bad encoding)...\n")
+                        problematic_filenames = scan_problematic_filenames_remote(
+                            ssh_client, params["share_path"]
+                        )
+                        self.queue.put(f"Found {len(problematic_filenames)} files/directories with problematic characters or bad encoding.\n\n")
                     
                     if params["cleanup_legacy_files"]:
                         self.queue.put("Scanning for legacy files...\n")
@@ -506,12 +537,10 @@ class App(tk.Tk):
                         total_legacy = len(legacy_files.get('files', [])) + len(legacy_files.get('directories', [])) + len(legacy_files.get('resource_forks', []))
                         self.queue.put(f"Found {total_legacy} legacy items to delete.\n\n")
                     
-                    if params["cleanup_filenames"]:
-                        self.queue.put("Scanning for problematic filenames (illegal characters and bad encoding)...\n")
-                        problematic_filenames = scan_problematic_filenames_remote(
-                            ssh_client, params["share_path"]
-                        )
-                        self.queue.put(f"Found {len(problematic_filenames)} files/directories with problematic characters or bad encoding.\n\n")
+                    if params["cleanup_empty_folders"]:
+                        self.queue.put("Scanning for empty folders...\n")
+                        empty_folders = scan_empty_folders_remote(ssh_client, params["share_path"], params["exclude_folder"])
+                        self.queue.put(f"Found {len(empty_folders)} empty folders.\n\n")
                     
                     self.queue.put("Generating cleanup scripts...\n")
                     output_dir, scripts = generate_categorized_cleanup_scripts(
@@ -534,7 +563,6 @@ class App(tk.Tk):
                         for script in scripts:
                             self.queue.put(f"  - {os.path.basename(script)}\n")
                         self.queue.put(f"\nReview the scripts and run them on your QNAP SSH terminal.\n")
-                        self.queue.put(f"To run all scripts: bash {os.path.join(output_dir, 'run_all.sh')}\n")
                 finally:
                     if ssh_client:
                         disconnect_ssh(ssh_client)

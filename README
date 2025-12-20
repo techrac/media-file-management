@@ -23,12 +23,11 @@ The tool operates in **two distinct modes**:
   - Legacy directories (`.@__thumb`, `.streams` folder at root)
   - macOS resource fork files (`._*` files with matching non-prefixed files)
   - Problematic filenames (characters like `:`, `~` that cause replication issues)
-- **Generate Categorized Scripts**: Creates organized bash scripts ready for QNAP SSH terminal:
+- **Generate Categorized Scripts**: Creates organized bash scripts ready for QNAP SSH terminal (run in order):
   - `permissions_to_fix.sh` - Permission fix commands
+  - `files_to_rename.sh` - Filename sanitization commands (run early to ensure clean names for all operations)
   - `files_to_delete.sh` - Legacy file deletion commands
-  - `folders_to_delete.sh` - Empty folder cleanup (multiple passes)
-  - `files_to_rename.sh` - Filename sanitization commands
-  - `run_all.sh` - Master script to run all fixes in sequence
+  - `folders_to_delete.sh` - Empty folder cleanup (run after renaming to avoid issues with invalid chars)
 - **Script Review**: Never executes changes directly - only generates scripts for user review and manual execution
 
 ### Interface

@@ -705,24 +705,57 @@ for dirpath, dirnames, filenames in os.walk(root):
         try:
             name.decode("utf-8", "strict")
         except UnicodeDecodeError:
-            full = os.path.join(dirpath, name)
-            # Initialize variables
-            inode = 0
-            parent_dir = ""
-            path_str = ""
-            try:
-                # Get inode number
-                stat_info = os.stat(full)
-                inode = stat_info.st_ino
-                parent_dir = dirpath.decode("utf-8", "backslashreplace") if isinstance(dirpath, bytes) else dirpath
-                path_str = full.decode("utf-8", "backslashreplace")
-            except:
-                # Fallback if stat fails
-                path_str = full.decode("utf-8", "backslashreplace")
-                parent_dir = dirpath.decode("utf-8", "backslashreplace") if isinstance(dirpath, bytes) else str(dirpath)
-                inode = 0
-            # Output: inode|parent_dir|path
-            print(f"{inode}|{parent_dir}|{path_str}")
+            # Use a helper function to avoid scoping issues
+            def get_file_info(dirpath, name):
+                inode_val = 0
+                parent_dir_val = ""
+                path_str_val = ""
+                
+                try:
+                    full = os.path.join(dirpath, name)
+                    # Get inode
+                    try:
+                        stat_info = os.stat(full)
+                        inode_val = stat_info.st_ino
+                    except:
+                        inode_val = 0
+                    
+                    # Get parent directory
+                    try:
+                        if isinstance(dirpath, bytes):
+                            parent_dir_val = dirpath.decode("utf-8", "backslashreplace")
+                        else:
+                            parent_dir_val = str(dirpath)
+                    except:
+                        parent_dir_val = str(dirpath) if not isinstance(dirpath, bytes) else ""
+                    
+                    # Get path string
+                    try:
+                        if isinstance(full, bytes):
+                            path_str_val = full.decode("utf-8", "backslashreplace")
+                        else:
+                            path_str_val = str(full)
+                    except:
+                        path_str_val = str(full) if not isinstance(full, bytes) else ""
+                except:
+                    # Fallback if os.path.join fails
+                    try:
+                        if isinstance(name, bytes):
+                            path_str_val = name.decode("utf-8", "backslashreplace")
+                        else:
+                            path_str_val = str(name)
+                        if isinstance(dirpath, bytes):
+                            parent_dir_val = dirpath.decode("utf-8", "backslashreplace")
+                        else:
+                            parent_dir_val = str(dirpath)
+                    except:
+                        pass
+                
+                return (inode_val, parent_dir_val, path_str_val)
+            
+            inode, parent_dir, path_str = get_file_info(dirpath, name)
+            if path_str:  # Only print if we have a path
+                print(f"{inode}|{parent_dir}|{path_str}")
 '''
     
     # Execute the Python script on the remote side
@@ -954,7 +987,34 @@ def generate_categorized_cleanup_scripts(
         os.chmod(script_path, 0o755)
         scripts_generated.append(script_path)
     
-    # 2. files_to_delete.sh
+    # 2. files_to_rename.sh (do this early to ensure clean names for all subsequent operations)
+    if has_problematic_filenames:
+        script_path = os.path.join(output_dir, 'files_to_rename.sh')
+        with open(script_path, 'w', encoding='utf-8') as f:
+            f.write("#!/bin/bash\n")
+            f.write(f"# Generated cleanup script for QNAP SSH terminal\n")
+            f.write(f"# Target path: {share_path}\n")
+            f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            f.write("set -e  # Exit on error\n\n")
+            f.write("echo \"=== Listing files/directories to rename ===\"\n")
+            # Format: (parent_dir, inode, original_path, sanitized_path)
+            for parent_dir, inode, orig_path, new_path in problematic_filenames:
+                f.write(f"# {orig_path} -> {new_path} (inode: {inode})\n")
+            f.write("\necho \"=== Renaming files/directories ===\"\n")
+            for parent_dir, inode, orig_path, new_path in problematic_filenames:
+                # Extract just the new basename
+                new_basename = os.path.basename(new_path)
+                # Construct the full new path
+                new_full_path = os.path.join(parent_dir, new_basename) if parent_dir and parent_dir != '.' else new_basename
+                # Use find with inode to locate the file/directory, then rename it
+                # This works even with non-UTF-8 filenames
+                f.write(f"# Renaming: {orig_path} -> {new_path}\n")
+                f.write(f"find {escape_shell_path(parent_dir)} -maxdepth 1 -inum {inode} -exec sh -c 'mv \"$1\" {escape_shell_path(new_full_path)}' _ {{}} \\; 2>/dev/null || echo \"Warning: Could not rename (inode {inode})\"\n")
+            f.write("\necho \"=== Filename sanitization complete ===\"\n")
+        os.chmod(script_path, 0o755)
+        scripts_generated.append(script_path)
+    
+    # 3. files_to_delete.sh
     if has_legacy_files:
         script_path = os.path.join(output_dir, 'files_to_delete.sh')
         with open(script_path, 'w', encoding='utf-8') as f:
@@ -986,7 +1046,7 @@ def generate_categorized_cleanup_scripts(
         os.chmod(script_path, 0o755)
         scripts_generated.append(script_path)
     
-    # 3. folders_to_delete.sh
+    # 4. folders_to_delete.sh (do this AFTER renaming to avoid issues with invalid chars)
     if has_empty_folders:
         script_path = os.path.join(output_dir, 'folders_to_delete.sh')
         with open(script_path, 'w', encoding='utf-8') as f:
@@ -1000,36 +1060,8 @@ def generate_categorized_cleanup_scripts(
             for parent_dir, inode, folder_path in empty_folders:
                 # Use find with inode to locate and delete the folder
                 # This works even with non-UTF-8 folder names
-                f.write(f"# Deleting: {folder_path} (inode: {inode})\n")
                 f.write(f"find {escape_shell_path(parent_dir)} -maxdepth 1 -inum {inode} -type d -exec rmdir {{}} \\; 2>/dev/null || echo \"Warning: Could not remove folder (inode {inode}, may no longer be empty)\"\n")
             f.write("\necho \"=== Empty folder cleanup complete ===\"\n")
-        os.chmod(script_path, 0o755)
-        scripts_generated.append(script_path)
-    
-    # 4. files_to_rename.sh
-    if has_problematic_filenames:
-        script_path = os.path.join(output_dir, 'files_to_rename.sh')
-        with open(script_path, 'w', encoding='utf-8') as f:
-            f.write("#!/bin/bash\n")
-            f.write(f"# Generated cleanup script for QNAP SSH terminal\n")
-            f.write(f"# Target path: {share_path}\n")
-            f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            f.write("set -e  # Exit on error\n\n")
-            f.write("echo \"=== Listing files/directories to rename ===\"\n")
-            # Format: (parent_dir, inode, original_path, sanitized_path)
-            for parent_dir, inode, orig_path, new_path in problematic_filenames:
-                f.write(f"# {orig_path} -> {new_path} (inode: {inode})\n")
-            f.write("\necho \"=== Renaming files/directories ===\"\n")
-            for parent_dir, inode, orig_path, new_path in problematic_filenames:
-                # Extract just the new basename
-                new_basename = os.path.basename(new_path)
-                # Construct the full new path
-                new_full_path = os.path.join(parent_dir, new_basename) if parent_dir and parent_dir != '.' else new_basename
-                # Use find with inode to locate the file/directory, then rename it
-                # This works even with non-UTF-8 filenames
-                f.write(f"# Renaming: {orig_path} -> {new_path}\n")
-                f.write(f"find {escape_shell_path(parent_dir)} -maxdepth 1 -inum {inode} -exec sh -c 'mv \"$1\" {escape_shell_path(new_full_path)}' _ {{}} \\; 2>/dev/null || echo \"Warning: Could not rename (inode {inode})\"\n")
-            f.write("\necho \"=== Filename sanitization complete ===\"\n")
         os.chmod(script_path, 0o755)
         scripts_generated.append(script_path)
     
@@ -1106,10 +1138,10 @@ def main():
                     permission_issues = scan_permission_issues(ssh_client, args.share_path, args.share_owner)
                     print(f"Found {len(permission_issues['wrong_owner_files'])} files and {len(permission_issues['wrong_owner_dirs'])} directories with wrong ownership.\n")
                 
-                if do_empty_folders:
-                    print("Scanning for empty folders...")
-                    empty_folders = scan_empty_folders_remote(ssh_client, args.share_path, exclude_patterns)
-                    print(f"Found {len(empty_folders)} empty folders.\n")
+                if do_filenames:
+                    print("Scanning for problematic filenames (illegal characters and bad encoding)...")
+                    problematic_filenames = scan_problematic_filenames_remote(ssh_client, args.share_path)
+                    print(f"Found {len(problematic_filenames)} files/directories with problematic characters or bad encoding.\n")
                 
                 if do_legacy_files:
                     print("Scanning for legacy files...")
@@ -1117,10 +1149,10 @@ def main():
                     total_legacy = len(legacy_files.get('files', [])) + len(legacy_files.get('directories', [])) + len(legacy_files.get('resource_forks', []))
                     print(f"Found {total_legacy} legacy items to delete ({len(legacy_files.get('files', []))} files, {len(legacy_files.get('directories', []))} directories, {len(legacy_files.get('resource_forks', []))} resource forks).\n")
                 
-                if do_filenames:
-                    print("Scanning for problematic filenames (illegal characters and bad encoding)...")
-                    problematic_filenames = scan_problematic_filenames_remote(ssh_client, args.share_path)
-                    print(f"Found {len(problematic_filenames)} files/directories with problematic characters or bad encoding.\n")
+                if do_empty_folders:
+                    print("Scanning for empty folders...")
+                    empty_folders = scan_empty_folders_remote(ssh_client, args.share_path, exclude_patterns)
+                    print(f"Found {len(empty_folders)} empty folders.\n")
                 
                 print("Generating cleanup scripts...")
                 output_dir, scripts = generate_categorized_cleanup_scripts(
