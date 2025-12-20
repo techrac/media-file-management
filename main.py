@@ -675,6 +675,9 @@ def scan_bad_encoding_filenames_remote(ssh_client, share_path: str):
     Scans for files/directories with non-UTF-8 encoding in their names.
     Uses a Python script on the remote side to detect encoding issues, similar to the user's example.
     
+    NOTE: The remote script is written for Python 2.7 (QNAP's default Python version).
+    This local function uses Python 3, but generates Python 2.7 compatible code for remote execution.
+    
     Args:
         ssh_client: SSHClient instance
         share_path: Path to the share root
@@ -686,15 +689,22 @@ def scan_bad_encoding_filenames_remote(ssh_client, share_path: str):
     import os.path
     import hashlib
     
-    # Create a Python script to detect bad encoding filenames and get inodes
+    # Create a Python 2.7 compatible script to detect bad encoding filenames and get inodes
+    # This script will run on QNAP which typically has Python 2.7
+    # NOTE: This script must be Python 2.7 compatible (no f-strings, use .format(), etc.)
     # This matches the user's example - checking if names can be decoded as UTF-8
     # We need to work with raw bytes from the filesystem by passing bytes path to os.walk
     share_path_bytes = share_path.encode('utf-8')
     # Format as bytes literal for the Python script
     root_repr = repr(share_path_bytes)
-    python_script = f'''import os, sys
+    # Python 2.7 compatible script (no f-strings, use .format() instead)
+    # Note: We use .format() here because this is a Python 3 f-string that generates Python 2.7 code
+    python_script = '''# -*- coding: utf-8 -*-
+# This script runs on QNAP with Python 2.7
+# It must be Python 2.7 compatible (no f-strings, Python 3-only features)
+import os, sys
 
-root = {root_repr}
+root = {0}
 
 bad = []
 for dirpath, dirnames, filenames in os.walk(root):
@@ -705,66 +715,71 @@ for dirpath, dirnames, filenames in os.walk(root):
         try:
             name.decode("utf-8", "strict")
         except UnicodeDecodeError:
-            # Use a helper function to avoid scoping issues
-            def get_file_info(dirpath, name):
-                inode_val = 0
-                parent_dir_val = ""
-                path_str_val = ""
-                
-                try:
-                    full = os.path.join(dirpath, name)
-                    # Get inode
-                    try:
-                        stat_info = os.stat(full)
-                        inode_val = stat_info.st_ino
-                    except:
-                        inode_val = 0
-                    
-                    # Get parent directory
-                    try:
-                        if isinstance(dirpath, bytes):
-                            parent_dir_val = dirpath.decode("utf-8", "backslashreplace")
-                        else:
-                            parent_dir_val = str(dirpath)
-                    except:
-                        parent_dir_val = str(dirpath) if not isinstance(dirpath, bytes) else ""
-                    
-                    # Get path string
-                    try:
-                        if isinstance(full, bytes):
-                            path_str_val = full.decode("utf-8", "backslashreplace")
-                        else:
-                            path_str_val = str(full)
-                    except:
-                        path_str_val = str(full) if not isinstance(full, bytes) else ""
-                except:
-                    # Fallback if os.path.join fails
-                    try:
-                        if isinstance(name, bytes):
-                            path_str_val = name.decode("utf-8", "backslashreplace")
-                        else:
-                            path_str_val = str(name)
-                        if isinstance(dirpath, bytes):
-                            parent_dir_val = dirpath.decode("utf-8", "backslashreplace")
-                        else:
-                            parent_dir_val = str(dirpath)
-                    except:
-                        pass
-                
-                return (inode_val, parent_dir_val, path_str_val)
+            # Initialize variables first to avoid scoping issues
+            inode = 0
+            parent_dir = ""
+            path_str = ""
             
-            inode, parent_dir, path_str = get_file_info(dirpath, name)
+            # Get file info directly without helper function to avoid scoping issues
+            try:
+                full = os.path.join(dirpath, name)
+                # Get inode
+                try:
+                    stat_info = os.stat(full)
+                    inode = stat_info.st_ino
+                except:
+                    inode = 0
+                
+                # Get parent directory
+                try:
+                    if isinstance(dirpath, bytes):
+                        parent_dir = dirpath.decode("utf-8", "backslashreplace")
+                    else:
+                        parent_dir = str(dirpath)
+                except:
+                    try:
+                        parent_dir = str(dirpath)
+                    except:
+                        parent_dir = ""
+                
+                # Get path string
+                try:
+                    if isinstance(full, bytes):
+                        path_str = full.decode("utf-8", "backslashreplace")
+                    else:
+                        path_str = str(full)
+                except:
+                    try:
+                        path_str = str(full)
+                    except:
+                        path_str = ""
+            except:
+                # Fallback if os.path.join fails
+                try:
+                    if isinstance(name, bytes):
+                        path_str = name.decode("utf-8", "backslashreplace")
+                    else:
+                        path_str = str(name)
+                    if isinstance(dirpath, bytes):
+                        parent_dir = dirpath.decode("utf-8", "backslashreplace")
+                    else:
+                        parent_dir = str(dirpath)
+                except:
+                    pass
+            
             if path_str:  # Only print if we have a path
-                print(f"{inode}|{parent_dir}|{path_str}")
-'''
+                print("{{0}}|{{1}}|{{2}}".format(inode, parent_dir, path_str))
+'''.format(root_repr)
     
-    # Execute the Python script on the remote side
+    # Execute the Python 2.7 script on the remote QNAP system
+    # QNAP typically has Python 2.7 as the default 'python' command
     # We need to properly escape the script for shell execution
     # Use base64 encoding to avoid shell escaping issues
     import base64
     script_bytes = python_script.encode('utf-8')
     script_b64 = base64.b64encode(script_bytes).decode('ascii')
-    cmd = f"echo '{script_b64}' | base64 -d | python3 2>/dev/null"
+    # Use 'python' (Python 2.7) on QNAP - the script is written to be Python 2.7 compatible
+    cmd = "echo '{0}' | base64 -d | python 2>/dev/null".format(script_b64)
     stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
     
     rename_list = []
@@ -847,16 +862,53 @@ def scan_problematic_filenames_remote(ssh_client, share_path: str):
     
     rename_list = []
     
-    # 1. Scan for illegal characters and spaces
-    # Build find pattern to match files/dirs with illegal characters or spaces
-    # Use -printf to get inode, parent directory, and filename
-    char_pattern = ' '.join([f"-o -name '*{char}*'" for char in ILLEGAL_FILENAME_CHARS])
-    char_pattern = char_pattern[4:]  # Remove leading " -o "
+    # 1. Scan for illegal characters and spaces using Python 2.7 script
+    # This is more reliable than shell glob patterns which don't handle special chars well
+    share_path_bytes = share_path.encode('utf-8')
+    root_repr = repr(share_path_bytes)
+    # Python 2.7 compatible script to find illegal characters
+    illegal_chars_repr = repr(ILLEGAL_FILENAME_CHARS)
+    python_script = '''# -*- coding: utf-8 -*-
+# This script runs on QNAP with Python 2.7
+# Scans for files/directories with illegal characters or leading/trailing spaces
+import os, sys
+
+root = {0}
+illegal_chars = {1}
+
+results = []
+for dirpath, dirnames, filenames in os.walk(root):
+    for name in dirnames + filenames:
+        # Check for illegal characters
+        has_illegal = False
+        for char in illegal_chars:
+            if char in name:
+                has_illegal = True
+                break
+        
+        # Check for leading or trailing spaces
+        has_spaces = (name.startswith(' ') or name.endswith(' '))
+        
+        if has_illegal or has_spaces:
+            try:
+                full = os.path.join(dirpath, name)
+                stat_info = os.stat(full)
+                inode = stat_info.st_ino
+                parent_dir = dirpath.decode("utf-8", "backslashreplace") if isinstance(dirpath, bytes) else str(dirpath)
+                path_str = full.decode("utf-8", "backslashreplace") if isinstance(full, bytes) else str(full)
+                results.append("{{0}}|{{1}}|{{2}}".format(inode, parent_dir, path_str))
+            except:
+                pass
+
+for r in results:
+    print(r)
+'''.format(root_repr, illegal_chars_repr)
     
-    # Also find files/dirs with leading or trailing spaces in the name
-    # Use -mindepth 1 to exclude the root directory itself
-    # Format: inode|parent_dir|basename
-    cmd = f"find '{share_path}' -mindepth 1 \\( -type f -o -type d \\) \\( {char_pattern} -o -name ' *' -o -name '* ' \\) -printf '%i|%h|%f\\n' 2>/dev/null"
+    # Execute the Python 2.7 script on the remote QNAP system
+    import base64
+    script_bytes = python_script.encode('utf-8')
+    script_b64 = base64.b64encode(script_bytes).decode('ascii')
+    cmd = "echo '{0}' | base64 -d | python 2>/dev/null".format(script_b64)
     stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
     
     if stdout.strip():
@@ -864,8 +916,9 @@ def scan_problematic_filenames_remote(ssh_client, share_path: str):
             if not line.strip():
                 continue
             try:
-                inode_str, dir_name, basename = line.strip().split('|', 2)
+                inode_str, dir_name, path = line.strip().split('|', 2)
                 inode = int(inode_str)
+                basename = os.path.basename(path)
                 
                 # Sanitize the basename
                 sanitized_basename = sanitize_filename(basename)
