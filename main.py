@@ -844,120 +844,125 @@ import os, sys
 
 root = {0}
 
-bad = []
-try:
-    for dirpath, dirnames, filenames in os.walk(root):
-        for name in dirnames + filenames:
-            # Check if name is bytes (str in Python 2.7) or unicode
-            # In Python 2.7: str = bytes, unicode = text
-            # We need to check bytes for bad encoding
+def scan_directory(directory):
+    """Recursively scan directory for bad encoding filenames"""
+    results = []
+    try:
+        # List directory contents - this works with bytes in Python 2.7
+        items = os.listdir(directory)
+        for name in items:
+            full_path = os.path.join(directory, name)
+            
+            # Check if it's a directory first
+            is_dir = os.path.isdir(full_path)
+            
+            # Check for bad encoding in the name
+            is_bad_encoding = False
+            
             if isinstance(name, unicode):
-                # If it's already unicode, it was decoded (possibly with errors)
-                # Check for replacement character which indicates bad encoding was decoded
+                # It's already unicode - might have been decoded with errors
+                # Check if it contains replacement character (indicates bad encoding was decoded)
                 if u'\\ufffd' in name:
-                    # Bad encoding was decoded to replacement chars - this will be caught by illegal chars scan
-                    # Skip here to avoid duplicates
-                    continue
-                # Valid unicode, skip
-                continue
+                    # Bad encoding was decoded to replacement chars
+                    is_bad_encoding = True
+            else:
+                # name is str (bytes) in Python 2.7
+                # Try to decode as UTF-8 with strict mode
+                try:
+                    decoded = name.decode("utf-8", "strict")
+                    # Successfully decoded - no bad encoding
+                except (UnicodeDecodeError, UnicodeError):
+                    # Bad encoding detected - bytes cannot be decoded as UTF-8
+                    is_bad_encoding = True
             
-            # name is str (bytes) in Python 2.7 - this is what we check for bad encoding
-            # Try to decode as UTF-8 with strict mode
-            try:
-                decoded = name.decode("utf-8", "strict")
-                # Successfully decoded - no bad encoding, skip
-                continue
-            except (UnicodeDecodeError, UnicodeError):
-                # Bad encoding detected - this file has non-UTF-8 bytes
-            # Bad encoding detected - initialize variables first
-            inode = 0
-            parent_dir = ""
-            path_str = ""
-            
-            # Get file info - use raw bytes paths for os.path.join and os.stat
-            # This ensures we can access files with bad encoding in their names
-            try:
-                # os.path.join works with bytes in Python 2.7
-                full = os.path.join(dirpath, name)
+            if is_bad_encoding:
+                # Bad encoding detected - initialize variables
+                inode = 0
+                parent_dir = ""
+                path_str = ""
                 
-                # Get inode using raw bytes path - this should always work
+                # Get file info - use raw bytes paths
                 try:
-                    stat_info = os.stat(full)
-                    inode = stat_info.st_ino
-                except Exception as e:
-                    # If stat fails, try to continue without inode
-                    inode = 0
-                
-                # Get parent directory for output
-                # Try to decode with replace to get readable text, but keep bytes as fallback
-                try:
-                    if isinstance(dirpath, unicode):
-                        # Already unicode, encode to bytes then decode with replace
-                        parent_dir = dirpath.encode("utf-8", "replace").decode("utf-8", "replace")
-                    else:
-                        # dirpath is str (bytes), decode with replace to handle any bad bytes
-                        parent_dir = dirpath.decode("utf-8", "replace")
-                except:
-                    # Fallback: use repr of bytes
+                    # Get inode using raw bytes path
                     try:
-                        parent_dir = repr(dirpath)
+                        stat_info = os.stat(full_path)
+                        inode = stat_info.st_ino
                     except:
-                        parent_dir = ""
-                
-                # Get full path string for output
-                # Use replace mode to ensure we can always decode something
-                try:
-                    if isinstance(full, unicode):
-                        # Already unicode, encode then decode with replace
-                        path_str = full.encode("utf-8", "replace").decode("utf-8", "replace")
-                    else:
-                        # full is str (bytes), decode with replace
-                        path_str = full.decode("utf-8", "replace")
-                except:
-                    # Fallback: use repr
-                    try:
-                        path_str = repr(full)
-                    except:
-                        path_str = ""
-            except Exception as e:
-                # If everything fails, try minimal fallback
-                try:
-                    # Just use the name itself, decoded with replace
-                    if isinstance(name, unicode):
-                        path_str = name.encode("utf-8", "replace").decode("utf-8", "replace")
-                    else:
-                        path_str = name.decode("utf-8", "replace")
+                        inode = 0
                     
-                    # Try to get parent
-                    if isinstance(dirpath, unicode):
-                        parent_dir = dirpath.encode("utf-8", "replace").decode("utf-8", "replace")
-                    else:
-                        parent_dir = dirpath.decode("utf-8", "replace")
-                except:
-                    # Last resort: use repr
+                    # Get parent directory for output
                     try:
-                        path_str = repr(name)
-                        parent_dir = repr(dirpath) if dirpath else ""
+                        if isinstance(directory, unicode):
+                            parent_dir = directory.encode("utf-8", "replace").decode("utf-8", "replace")
+                        else:
+                            parent_dir = directory.decode("utf-8", "replace")
                     except:
-                        pass
-            
-            # Always output when bad encoding is detected, even if we couldn't get all info
-            # Use the name itself as fallback if path_str is empty
-            if not path_str:
-                try:
-                    if isinstance(name, unicode):
-                        path_str = name.encode("utf-8", "replace").decode("utf-8", "replace")
-                    else:
-                        path_str = name.decode("utf-8", "replace")
+                        try:
+                            parent_dir = repr(directory)
+                        except:
+                            parent_dir = ""
+                    
+                    # Get full path string for output
+                    try:
+                        if isinstance(full_path, unicode):
+                            path_str = full_path.encode("utf-8", "replace").decode("utf-8", "replace")
+                        else:
+                            path_str = full_path.decode("utf-8", "replace")
+                    except:
+                        try:
+                            path_str = repr(full_path)
+                        except:
+                            path_str = ""
                 except:
-                    path_str = repr(name) if name else "unknown"
+                    # Fallback
+                    try:
+                        if isinstance(name, unicode):
+                            path_str = name.encode("utf-8", "replace").decode("utf-8", "replace")
+                        else:
+                            path_str = name.decode("utf-8", "replace")
+                        if isinstance(directory, unicode):
+                            parent_dir = directory.encode("utf-8", "replace").decode("utf-8", "replace")
+                        else:
+                            parent_dir = directory.decode("utf-8", "replace")
+                    except:
+                        try:
+                            path_str = repr(name) if name else "unknown"
+                            parent_dir = repr(directory) if directory else ""
+                        except:
+                            pass
+                
+                # Always output when bad encoding is detected
+                if not path_str:
+                    try:
+                        if isinstance(name, unicode):
+                            path_str = name.encode("utf-8", "replace").decode("utf-8", "replace")
+                        else:
+                            path_str = name.decode("utf-8", "replace")
+                    except:
+                        path_str = repr(name) if name else "unknown"
+                
+                results.append((inode, parent_dir, path_str))
             
-            # Always output - bad encoding was detected
-            print("{{0}}|{{1}}|{{2}}".format(inode, parent_dir, path_str))
+            # Recursively scan subdirectories
+            if is_dir:
+                try:
+                    sub_results = scan_directory(full_path)
+                    results.extend(sub_results)
+                except:
+                    pass
+    except:
+        pass
+    
+    return results
+
+# Start scanning from root
+try:
+    all_results = scan_directory(root)
+    for inode, parent_dir, path_str in all_results:
+        print("{{0}}|{{1}}|{{2}}".format(inode, parent_dir, path_str))
 except Exception as e:
-    # If os.walk fails, try to continue with os.listdir on root
     import traceback
-    sys.stderr.write("Error in os.walk: " + str(e) + "\\n")
+    sys.stderr.write("Error scanning: " + str(e) + "\\n")
     sys.stderr.write(traceback.format_exc())
 '''.format(root_repr)
     
