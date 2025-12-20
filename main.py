@@ -845,16 +845,30 @@ import os, sys
 root = {0}
 
 bad = []
-for dirpath, dirnames, filenames in os.walk(root):
-    for name in dirnames + filenames:
-        # In Python 2.7, if name is unicode, it's already decoded - skip
-        # We only check str (bytes) for encoding issues
-        if isinstance(name, unicode):
-            continue
-        # name is str (bytes) in Python 2.7, try to decode as UTF-8
-        try:
-            name.decode("utf-8", "strict")
-        except (UnicodeDecodeError, UnicodeError):
+try:
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in dirnames + filenames:
+            # Check if name is bytes (str in Python 2.7) or unicode
+            # In Python 2.7: str = bytes, unicode = text
+            # We need to check bytes for bad encoding
+            if isinstance(name, unicode):
+                # If it's already unicode, it was decoded (possibly with errors)
+                # Check for replacement character which indicates bad encoding was decoded
+                if u'\\ufffd' in name:
+                    # Bad encoding was decoded to replacement chars - this will be caught by illegal chars scan
+                    # Skip here to avoid duplicates
+                    continue
+                # Valid unicode, skip
+                continue
+            
+            # name is str (bytes) in Python 2.7 - this is what we check for bad encoding
+            # Try to decode as UTF-8 with strict mode
+            try:
+                decoded = name.decode("utf-8", "strict")
+                # Successfully decoded - no bad encoding, skip
+                continue
+            except (UnicodeDecodeError, UnicodeError):
+                # Bad encoding detected - this file has non-UTF-8 bytes
             # Bad encoding detected - initialize variables first
             inode = 0
             parent_dir = ""
@@ -927,9 +941,24 @@ for dirpath, dirnames, filenames in os.walk(root):
                     except:
                         pass
             
-            # Only output if we have at least an inode or a path
-            if inode > 0 or path_str:
-                print("{{0}}|{{1}}|{{2}}".format(inode, parent_dir, path_str))
+            # Always output when bad encoding is detected, even if we couldn't get all info
+            # Use the name itself as fallback if path_str is empty
+            if not path_str:
+                try:
+                    if isinstance(name, unicode):
+                        path_str = name.encode("utf-8", "replace").decode("utf-8", "replace")
+                    else:
+                        path_str = name.decode("utf-8", "replace")
+                except:
+                    path_str = repr(name) if name else "unknown"
+            
+            # Always output - bad encoding was detected
+            print("{{0}}|{{1}}|{{2}}".format(inode, parent_dir, path_str))
+except Exception as e:
+    # If os.walk fails, try to continue with os.listdir on root
+    import traceback
+    sys.stderr.write("Error in os.walk: " + str(e) + "\\n")
+    sys.stderr.write(traceback.format_exc())
 '''.format(root_repr)
     
     # Execute the Python 2.7 script on the remote QNAP system
