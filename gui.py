@@ -81,7 +81,7 @@ class App(tk.Tk):
     def create_widgets(self):
         # --- Mode Selection ---
         mode_frame = ttk.LabelFrame(self, text="Mode", padding="10")
-        mode_frame.pack(fill=tk.X, padx=10, pady=5)
+        mode_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
         
         self.mode_var = tk.StringVar(value="local")
         self.mode_var.trace_add("write", self.on_mode_changed)
@@ -198,16 +198,10 @@ class App(tk.Tk):
         ttk.Label(self.remote_cleanup_frame, text="Exclude folders:").pack(anchor=tk.W, pady=(5, 0))
         self.exclude_folder_var = tk.StringVar(value=".fcpbundle")
         ttk.Entry(self.remote_cleanup_frame, textvariable=self.exclude_folder_var, width=30).pack(anchor=tk.W, fill=tk.X)
-        
-        # --- Remote Mode: Output Directory ---
-        self.remote_settings_frame = ttk.LabelFrame(self, text="Settings", padding="10")
-        ttk.Label(self.remote_settings_frame, text="Output Directory (optional, defaults to timestamped directory):").pack(anchor=tk.W)
-        self.output_dir_var = tk.StringVar()
-        ttk.Entry(self.remote_settings_frame, textvariable=self.output_dir_var, width=50).pack(anchor=tk.W, fill=tk.X)
 
         # --- Command Preview ---
         command_frame = ttk.LabelFrame(self, text="Command Line Preview", padding="10")
-        command_frame.pack(fill=tk.X, padx=10, pady=5)
+        command_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
 
         self.command_preview_var = tk.StringVar()
         command_entry = ttk.Entry(command_frame, textvariable=self.command_preview_var, state="readonly", font=("Courier", 10))
@@ -215,7 +209,7 @@ class App(tk.Tk):
 
         # --- Buttons Frame ---
         buttons_frame = ttk.Frame(self)
-        buttons_frame.pack(pady=10)
+        buttons_frame.pack(side=tk.TOP, pady=10)
 
         self.run_button = ttk.Button(buttons_frame, text="Run Tasks", command=self.run_tasks)
         self.run_button.pack(side=tk.LEFT, padx=5)
@@ -223,9 +217,9 @@ class App(tk.Tk):
         self.copy_button = ttk.Button(buttons_frame, text="Copy Output", command=self.copy_output_to_clipboard)
         self.copy_button.pack(side=tk.LEFT, padx=5)
 
-        # --- Output Console ---
+        # --- Output Console (at bottom) ---
         console_frame = ttk.LabelFrame(self, text="Output", padding="10")
-        console_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        console_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 10))
 
         self.console = tk.Text(console_frame, wrap=tk.WORD, height=15)
         # Make the text widget read-only by intercepting key presses.
@@ -246,14 +240,12 @@ class App(tk.Tk):
             self.local_settings_frame.pack(fill=tk.X, padx=10, pady=5, anchor=tk.W)
             self.ssh_frame.pack_forget()
             self.remote_cleanup_frame.pack_forget()
-            self.remote_settings_frame.pack_forget()
         else:
             self.folder_path_frame.grid_remove()
             self.local_actions_frame.pack_forget()
             self.local_settings_frame.pack_forget()
             self.ssh_frame.pack(fill=tk.X, padx=10, pady=5, anchor=tk.W)
             self.remote_cleanup_frame.pack(fill=tk.X, padx=10, pady=5, anchor=tk.W)
-            self.remote_settings_frame.pack(fill=tk.X, padx=10, pady=5, anchor=tk.W)
         self.update_command_preview()
         
     def browse_folder(self):
@@ -306,8 +298,6 @@ class App(tk.Tk):
                         self.share_path_var.set(config["share_path"])
                     if config.get("share_owner"):
                         self.share_owner_var.set(config["share_owner"])
-                    if config.get("output_dir"):
-                        self.output_dir_var.set(config["output_dir"])
         except (IOError, json.JSONDecodeError) as e:
             # It's okay if this fails, we just won't load previous settings.
             print(f"Could not load settings from {self.config_file}: {e}")
@@ -324,7 +314,6 @@ class App(tk.Tk):
             "ssh_port": self.ssh_port_var.get(),
             "share_path": self.share_path_var.get(),
             "share_owner": self.share_owner_var.get(),
-            "output_dir": self.output_dir_var.get(),
         }
         try:
             with open(self.config_file, 'w') as f:
@@ -346,12 +335,12 @@ class App(tk.Tk):
         
         mode = self.mode_var.get()
         if mode == "local":
-        folder_path = self.folder_path_var.get()
-        if folder_path:
-            # Use quotes to handle paths with spaces
-            parts.append(f'"{folder_path}"')
-        else:
-            parts.append("<folder_path>")
+            folder_path = self.folder_path_var.get()
+            if folder_path:
+                # Use quotes to handle paths with spaces
+                parts.append(f'"{folder_path}"')
+            else:
+                parts.append("<folder_path>")
 
         if self.flatten_var.get(): parts.append("--flatten")
         if self.delete_dups_var.get(): parts.append("--delete-dups")
@@ -380,8 +369,6 @@ class App(tk.Tk):
             if not cleanup_flags: cleanup_flags.append("--cleanup-all")
             parts.extend(cleanup_flags)
             
-            if self.output_dir_var.get(): parts.append(f'--output-dir "{self.output_dir_var.get()}"')
-            
         self.command_preview_var.set(" ".join(parts))
 
     def on_closing(self):
@@ -395,10 +382,10 @@ class App(tk.Tk):
         mode = self.mode_var.get()
         
         if mode == "local":
-        folder_path = self.folder_path_var.get()
-        if not folder_path or not os.path.isdir(folder_path):
-            messagebox.showerror("Error", "Please select a valid folder.")
-            return
+            folder_path = self.folder_path_var.get()
+            if not folder_path or not os.path.isdir(folder_path):
+                messagebox.showerror("Error", "Please select a valid folder.")
+                return
         else:
             # Remote mode validation
             if not self.ssh_host_var.get() or not self.ssh_user_var.get() or not self.ssh_key_var.get():
@@ -426,17 +413,17 @@ class App(tk.Tk):
 
         # Get settings from GUI
         if mode == "local":
-        params = {
+            params = {
                 "mode": "local",
-            "folder_path": folder_path,
-            "do_flatten": self.flatten_var.get(),
-            "do_delete_dups": self.delete_dups_var.get(),
-            "do_rename": self.rename_var.get(),
-            "is_dry_run": self.dry_run_var.get(),
-            "is_debug": self.debug_var.get(),
-            "force_overwrite": self.force_overwrite_var.get(),
-            "timezone": self.timezone_var.get() or None,
-        }
+                "folder_path": folder_path,
+                "do_flatten": self.flatten_var.get(),
+                "do_delete_dups": self.delete_dups_var.get(),
+                "do_rename": self.rename_var.get(),
+                "is_dry_run": self.dry_run_var.get(),
+                "is_debug": self.debug_var.get(),
+                "force_overwrite": self.force_overwrite_var.get(),
+                "timezone": self.timezone_var.get() or None,
+            }
         else:
             params = {
                 "mode": "remote",
@@ -452,7 +439,6 @@ class App(tk.Tk):
                 "cleanup_filenames": self.cleanup_filenames_var.get(),
                 "problem_chars": [c.strip() for c in self.problem_chars_var.get().split(',')],
                 "exclude_folder": [p.strip() for p in self.exclude_folder_var.get().split(',')],
-                "output_dir": self.output_dir_var.get() or None,
             }
         
         # Start worker thread
@@ -471,25 +457,25 @@ class App(tk.Tk):
         try:
             if params["mode"] == "local":
                 self.queue.put("--- Starting local mode tasks ---\n")
-            if params["do_flatten"]:
-                self.queue.put("\n=== Running: Flatten Directory ===\n")
-                flatten_directory(folder_path=params["folder_path"], dry_run=params["is_dry_run"])
-            
-            if params["do_delete_dups"]:
-                self.queue.put("\n=== Running: Find/Delete Duplicates ===\n")
-                process_duplicate_files(folder_path=params["folder_path"], dry_run=params["is_dry_run"], debug=params["is_debug"])
+                if params["do_flatten"]:
+                    self.queue.put("\n=== Running: Flatten Directory ===\n")
+                    flatten_directory(folder_path=params["folder_path"], dry_run=params["is_dry_run"])
+                
+                if params["do_delete_dups"]:
+                    self.queue.put("\n=== Running: Find/Delete Duplicates ===\n")
+                    process_duplicate_files(folder_path=params["folder_path"], dry_run=params["is_dry_run"], debug=params["is_debug"])
 
-            if params["do_rename"]:
-                self.queue.put("\n=== Running: Rename Media ===\n")
-                rename_media(
-                    folder_path=params["folder_path"],
-                    dry_run=params["is_dry_run"],
-                    debug=params["is_debug"],
-                    force_overwrite=params["force_overwrite"],
-                    timezone=params["timezone"]
-                )
-            
-            self.queue.put("\n--- All tasks completed! ---\n")
+                if params["do_rename"]:
+                    self.queue.put("\n=== Running: Rename Media ===\n")
+                    rename_media(
+                        folder_path=params["folder_path"],
+                        dry_run=params["is_dry_run"],
+                        debug=params["is_debug"],
+                        force_overwrite=params["force_overwrite"],
+                        timezone=params["timezone"]
+                    )
+                
+                self.queue.put("\n--- All tasks completed! ---\n")
             else:
                 # Remote mode
                 self.queue.put("--- Starting remote SSH mode tasks ---\n")
@@ -540,8 +526,7 @@ class App(tk.Tk):
                         empty_folders=empty_folders,
                         legacy_files=legacy_files,
                         problematic_filenames=problematic_filenames,
-                        exclude_patterns=params["exclude_folder"],
-                        output_dir=params["output_dir"]
+                        exclude_patterns=params["exclude_folder"]
                     )
                     
                     self.queue.put(f"\n=== Scripts generated successfully ===\n")
@@ -592,8 +577,8 @@ class App(tk.Tk):
 
 if __name__ == "__main__":
     try:
-    app = App()
-    app.mainloop()
+        app = App()
+        app.mainloop()
     except Exception as e:
         print(f"Error starting GUI: {e}")
         import traceback

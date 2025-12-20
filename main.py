@@ -564,12 +564,12 @@ def scan_empty_folders_remote(ssh_client, share_path: str, exclude_patterns: lis
     Args:
         ssh_client: SSHClient instance
         share_path: Path to the share root
-        exclude_patterns: List of folder names to exclude (e.g., ['.fcpbundle'])
+        exclude_patterns: List of folder name patterns to exclude (e.g., ['*.fcpbundle'] for folders ending with .fcpbundle)
     
     Returns:
         List of empty folder paths (deepest first)
     """
-    # Build exclude pattern for find command
+    # Build exclude pattern for find command (supports wildcards like *.fcpbundle)
     exclude_args = ' '.join([f"-not -name '{pattern}'" for pattern in exclude_patterns])
     
     # Find empty directories
@@ -715,7 +715,7 @@ def generate_categorized_cleanup_scripts(
         empty_folders: List from scan_empty_folders_remote
         legacy_files: Dict from scan_legacy_files_remote
         problematic_filenames: List of tuples from scan_problematic_filenames_remote
-        exclude_patterns: List of folder names to exclude
+        exclude_patterns: List of folder name patterns to exclude (e.g., ['*.fcpbundle'] for folders ending with .fcpbundle)
         output_dir: Directory to write scripts (default: Downloads folder with timestamp subfolder)
         ssh_client: Optional SSH client (not used, kept for backward compatibility)
     """
@@ -738,7 +738,7 @@ def generate_categorized_cleanup_scripts(
     # Create the directory locally
     os.makedirs(output_dir, exist_ok=True)
     
-    exclude_patterns = exclude_patterns or ['.fcpbundle']
+    exclude_patterns = exclude_patterns or ['*.fcpbundle']
     
     scripts_generated = []
     
@@ -803,22 +803,14 @@ def generate_categorized_cleanup_scripts(
             f.write(f"# Generated cleanup script for QNAP SSH terminal\n")
             f.write(f"# Target path: {share_path}\n")
             f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            f.write("set -e  # Exit on error\n\n")
-            f.write("echo \"=== Listing empty folders ===\"\n")
-            exclude_args = ' '.join([f"-not -name '{pattern}'" for pattern in exclude_patterns])
-            f.write(f"find {escape_shell_path(share_path)} -type d -mindepth 1 {exclude_args} -exec sh -c 'if [ -z \"$(ls -A \"$1\" 2>/dev/null)\" ]; then echo \"$1\"; fi' sh {{}} \\;\n\n")
-            f.write("echo \"=== Deleting empty folders (multiple passes) ===\"\n")
-            f.write("MAX_PASSES=10\n")
-            f.write("for i in $(seq 1 $MAX_PASSES); do\n")
-            exclude_args_rmdir = ' '.join([f"-not -name '{pattern}'" for pattern in exclude_patterns])
-            f.write(f"  COUNT=$(find {escape_shell_path(share_path)} -type d -mindepth 1 {exclude_args_rmdir} -exec rmdir {{}} \\; 2>/dev/null | wc -l || echo 0)\n")
-            f.write("  if [ $COUNT -eq 0 ]; then\n")
-            f.write("    echo \"No more empty folders found after pass $i\"\n")
-            f.write("    break\n")
-            f.write("  fi\n")
-            f.write("  echo \"Pass $i: Removed empty folders\"\n")
-            f.write("done\n\n")
-            f.write("echo \"=== Empty folder cleanup complete ===\"\n")
+            f.write("echo \"=== Listing empty folders to delete ===\"\n")
+            for folder_path in empty_folders:
+                f.write(f"# {folder_path}\n")
+            f.write("\necho \"=== Deleting empty folders ===\"\n")
+            # Write explicit rmdir commands for each folder (sorted deepest first for safe deletion)
+            for folder_path in empty_folders:
+                f.write(f"rmdir {escape_shell_path(folder_path)} || echo \"Warning: Could not remove {folder_path} (may no longer be empty)\"\n")
+            f.write("\necho \"=== Empty folder cleanup complete ===\"\n")
         os.chmod(script_path, 0o755)
         scripts_generated.append(script_path)
     
@@ -838,40 +830,6 @@ def generate_categorized_cleanup_scripts(
             for orig_path, new_path in problematic_filenames:
                 f.write(f"sudo mv {escape_shell_path(orig_path)} {escape_shell_path(new_path)}\n")
             f.write("\necho \"=== Filename sanitization complete ===\"\n")
-        os.chmod(script_path, 0o755)
-        scripts_generated.append(script_path)
-    
-    # 5. run_all.sh - Master script
-    if scripts_generated:
-        script_path = os.path.join(output_dir, 'run_all.sh')
-        with open(script_path, 'w', encoding='utf-8') as f:
-            f.write("#!/bin/bash\n")
-            f.write(f"# Master cleanup script for QNAP SSH terminal\n")
-            f.write(f"# Target path: {share_path}\n")
-            f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            f.write("set -e  # Exit on error\n\n")
-            f.write("SCRIPT_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")\" && pwd)\"\n\n")
-            f.write("echo \"=== Starting QNAP Cleanup Scripts ===\"\n\n")
-            
-            # Execute scripts in order - check if files exist in the generated scripts list
-            script_names = [os.path.basename(s) for s in scripts_generated]
-            if 'permissions_to_fix.sh' in script_names:
-                f.write("echo \"\\n[1/4] Running permission fixes...\"\n")
-                f.write("bash \"$SCRIPT_DIR/permissions_to_fix.sh\"\n\n")
-            
-            if 'files_to_rename.sh' in script_names:
-                f.write("echo \"\\n[2/4] Running filename sanitization...\"\n")
-                f.write("bash \"$SCRIPT_DIR/files_to_rename.sh\"\n\n")
-            
-            if 'files_to_delete.sh' in script_names:
-                f.write("echo \"\\n[3/4] Deleting legacy files...\"\n")
-                f.write("bash \"$SCRIPT_DIR/files_to_delete.sh\"\n\n")
-            
-            if 'folders_to_delete.sh' in script_names:
-                f.write("echo \"\\n[4/4] Deleting empty folders...\"\n")
-                f.write("bash \"$SCRIPT_DIR/folders_to_delete.sh\"\n\n")
-            
-            f.write("echo \"\\n=== All cleanup operations complete ===\"\n")
         os.chmod(script_path, 0o755)
         scripts_generated.append(script_path)
     
@@ -912,7 +870,7 @@ def main():
         parser.add_argument("--cleanup-legacy-files", action="store_true", help="Enable legacy file cleanup scan (includes Windows cache files, .streams, ._* resource fork files).")
         parser.add_argument("--cleanup-filenames", action="store_true", help="Enable filename character replacement scan.")
         parser.add_argument("--problem-chars", default="?, ;, :, ~, !, $, /, \\", help="Comma-separated list of problematic characters to replace with underscore (default: '?, ;, :, ~, !, $, /, \\'). Spaces are also trimmed from filenames.")
-        parser.add_argument("--exclude-folder", default=".fcpbundle", help="Comma-separated list of folder names to exclude from empty folder cleanup (default: '.fcpbundle').")
+        parser.add_argument("--exclude-folder", default="*.fcpbundle", help="Comma-separated list of folder name patterns to exclude from empty folder cleanup (default: '*.fcpbundle' - matches folders ending with .fcpbundle).")
         parser.add_argument("--output-dir", help="Directory for generated scripts (default: qnap_cleanup_YYYYMMDD_HHMMSS/).")
         
         args = parser.parse_args()
@@ -986,8 +944,7 @@ def main():
                 print(f"Scripts generated: {len(scripts)}")
                 for script in scripts:
                     print(f"  - {os.path.basename(script)}")
-                print(f"\nReview the scripts and run them on your QNAP SSH terminal.")
-                print(f"To run all scripts: bash {os.path.join(output_dir, 'run_all.sh')}")
+                print(f"\nReview the scripts and run them one by one on your QNAP SSH terminal.")
                 
             finally:
                 disconnect_ssh(ssh_client)
