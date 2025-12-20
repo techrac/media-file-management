@@ -183,19 +183,15 @@ class App(tk.Tk):
         ttk.Checkbutton(self.remote_cleanup_frame, text="Fix permissions", variable=self.cleanup_permissions_var).pack(anchor=tk.W)
         
         self.cleanup_empty_folders_var = tk.BooleanVar()
-        ttk.Checkbutton(self.remote_cleanup_frame, text="Cleanup empty folders", variable=self.cleanup_empty_folders_var).pack(anchor=tk.W)
+        ttk.Checkbutton(self.remote_cleanup_frame, text="Delete empty folders", variable=self.cleanup_empty_folders_var).pack(anchor=tk.W)
         
         self.cleanup_legacy_files_var = tk.BooleanVar()
-        ttk.Checkbutton(self.remote_cleanup_frame, text="Cleanup legacy files (Windows cache: Thumbs.db, ehthumbs.db, Desktop.ini, IconCache.db; .streams, .@__thumb, ._* resource forks)", variable=self.cleanup_legacy_files_var).pack(anchor=tk.W)
+        ttk.Checkbutton(self.remote_cleanup_frame, text="Delete legacy files (Windows cache: Thumbs.db, ehthumbs.db, Desktop.ini, IconCache.db; .streams, .@__thumb, ._* resource forks)", variable=self.cleanup_legacy_files_var).pack(anchor=tk.W)
         
         self.cleanup_filenames_var = tk.BooleanVar()
-        ttk.Checkbutton(self.remote_cleanup_frame, text="Cleanup problematic filenames", variable=self.cleanup_filenames_var).pack(anchor=tk.W)
+        ttk.Checkbutton(self.remote_cleanup_frame, text="Rename problematic filenames (illegal characters and bad encoding)", variable=self.cleanup_filenames_var).pack(anchor=tk.W)
         
-        ttk.Label(self.remote_cleanup_frame, text="Problematic characters (replaced with _; spaces trimmed):").pack(anchor=tk.W, pady=(10, 0))
-        self.problem_chars_var = tk.StringVar(value="?, ;, :, ~, !, $, /, \\")
-        ttk.Entry(self.remote_cleanup_frame, textvariable=self.problem_chars_var, width=30).pack(anchor=tk.W, fill=tk.X)
-        
-        ttk.Label(self.remote_cleanup_frame, text="Exclude folders:").pack(anchor=tk.W, pady=(5, 0))
+        ttk.Label(self.remote_cleanup_frame, text="Exclude folders:").pack(anchor=tk.W, pady=(10, 0))
         self.exclude_folder_var = tk.StringVar(value=".fcpbundle")
         ttk.Entry(self.remote_cleanup_frame, textvariable=self.exclude_folder_var, width=30).pack(anchor=tk.W, fill=tk.X)
 
@@ -437,7 +433,6 @@ class App(tk.Tk):
                 "cleanup_empty_folders": self.cleanup_empty_folders_var.get(),
                 "cleanup_legacy_files": self.cleanup_legacy_files_var.get(),
                 "cleanup_filenames": self.cleanup_filenames_var.get(),
-                "problem_chars": [c.strip() for c in self.problem_chars_var.get().split(',')],
                 "exclude_folder": [p.strip() for p in self.exclude_folder_var.get().split(',')],
             }
         
@@ -512,11 +507,11 @@ class App(tk.Tk):
                         self.queue.put(f"Found {total_legacy} legacy items to delete.\n\n")
                     
                     if params["cleanup_filenames"]:
-                        self.queue.put("Scanning for problematic filenames...\n")
+                        self.queue.put("Scanning for problematic filenames (illegal characters and bad encoding)...\n")
                         problematic_filenames = scan_problematic_filenames_remote(
-                            ssh_client, params["share_path"], params["problem_chars"]
+                            ssh_client, params["share_path"]
                         )
-                        self.queue.put(f"Found {len(problematic_filenames)} files/directories with problematic characters.\n\n")
+                        self.queue.put(f"Found {len(problematic_filenames)} files/directories with problematic characters or bad encoding.\n\n")
                     
                     self.queue.put("Generating cleanup scripts...\n")
                     output_dir, scripts = generate_categorized_cleanup_scripts(
@@ -529,13 +524,17 @@ class App(tk.Tk):
                         exclude_patterns=params["exclude_folder"]
                     )
                     
-                    self.queue.put(f"\n=== Scripts generated successfully ===\n")
-                    self.queue.put(f"Output directory: {os.path.abspath(output_dir)}\n")
-                    self.queue.put(f"Scripts generated: {len(scripts)}\n")
-                    for script in scripts:
-                        self.queue.put(f"  - {os.path.basename(script)}\n")
-                    self.queue.put(f"\nReview the scripts and run them on your QNAP SSH terminal.\n")
-                    self.queue.put(f"To run all scripts: bash {os.path.join(output_dir, 'run_all.sh')}\n")
+                    if output_dir is None:
+                        self.queue.put(f"\n=== No scripts generated ===\n")
+                        self.queue.put("No issues found that require cleanup scripts.\n")
+                    else:
+                        self.queue.put(f"\n=== Scripts generated successfully ===\n")
+                        self.queue.put(f"Output directory: {os.path.abspath(output_dir)}\n")
+                        self.queue.put(f"Scripts generated: {len(scripts)}\n")
+                        for script in scripts:
+                            self.queue.put(f"  - {os.path.basename(script)}\n")
+                        self.queue.put(f"\nReview the scripts and run them on your QNAP SSH terminal.\n")
+                        self.queue.put(f"To run all scripts: bash {os.path.join(output_dir, 'run_all.sh')}\n")
                 finally:
                     if ssh_client:
                         disconnect_ssh(ssh_client)
