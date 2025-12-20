@@ -670,6 +670,143 @@ def sanitize_filename(basename: str) -> str:
     sanitized = sanitized.strip()
     return sanitized
 
+def debug_filename_bytes_remote(ssh_client, share_path: str, sample_path: str = None):
+    """
+    Debug function to export raw bytes of filenames for analysis.
+    This helps diagnose encoding issues by showing the actual bytes.
+    
+    Args:
+        ssh_client: SSHClient instance
+        share_path: Path to the share root
+        sample_path: Optional specific path to analyze (if None, analyzes all)
+    
+    Returns:
+        String with diagnostic information about filenames and their bytes
+    """
+    share_path_bytes = share_path.encode('utf-8')
+    root_repr = repr(share_path_bytes)
+    sample_repr = repr(sample_path.encode('utf-8') if sample_path else None)
+    
+    python_script = '''# -*- coding: utf-8 -*-
+# This script runs on QNAP with Python 2.7
+# Exports raw bytes of filenames for encoding analysis
+import os, sys
+
+root = {0}
+sample_path = {1}
+
+def analyze_name(name, full_path):
+    """Analyze a filename and return diagnostic info"""
+    result = []
+    result.append("=== Filename Analysis ===")
+    result.append("Path: " + str(full_path))
+    result.append("Type: " + str(type(name).__name__))
+    
+    # Get raw bytes representation
+    if isinstance(name, unicode):
+        # It's unicode, show the unicode code points and bytes
+        result.append("Unicode repr: " + repr(name))
+        try:
+            name_bytes = name.encode("utf-8")
+            result.append("UTF-8 bytes (hex): " + name_bytes.encode("hex"))
+            result.append("UTF-8 bytes (repr): " + repr(name_bytes))
+        except:
+            result.append("Could not encode to UTF-8")
+        # Check for replacement characters
+        if u'\\ufffd' in name:
+            result.append("Contains Unicode replacement character (U+FFFD)")
+    else:
+        # It's str (bytes) in Python 2.7
+        result.append("Bytes (hex): " + name.encode("hex"))
+        result.append("Bytes (repr): " + repr(name))
+        # Try to decode
+        try:
+            decoded = name.decode("utf-8", "strict")
+            result.append("Decodes to UTF-8: " + repr(decoded))
+        except UnicodeDecodeError as e:
+            result.append("UTF-8 decode ERROR: " + str(e))
+            result.append("Bad bytes at position: " + str(e.start) + "-" + str(e.end))
+            # Show the problematic bytes
+            bad_bytes = name[e.start:e.end]
+            result.append("Problematic bytes (hex): " + bad_bytes.encode("hex"))
+            result.append("Problematic bytes (repr): " + repr(bad_bytes))
+            # Try with replace
+            decoded_replace = name.decode("utf-8", "replace")
+            result.append("Decoded with replace: " + repr(decoded_replace))
+    
+    result.append("")
+    return "\\n".join(result)
+
+if sample_path:
+    # Analyze specific path - list contents if directory, analyze file if file
+    print("Analyzing path: " + str(sample_path))
+    if os.path.exists(sample_path):
+        if os.path.isdir(sample_path):
+            # It's a directory - analyze its contents
+            print("Path is a directory, analyzing contents:")
+            try:
+                for item in os.listdir(sample_path):
+                    item_path = os.path.join(sample_path, item)
+                    if os.path.exists(item_path):
+                        print(analyze_name(item, item_path))
+            except Exception as e:
+                print("Error listing directory: " + str(e))
+        else:
+            # It's a file - analyze the file itself
+            name = os.path.basename(sample_path)
+            print("Path is a file, analyzing:")
+            print(analyze_name(name, sample_path))
+    else:
+        print("Path does not exist: " + str(sample_path))
+else:
+    # Analyze all files in root
+    print("Analyzing all files in: " + str(root))
+    count = 0
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            for name in dirnames + filenames:
+                full = os.path.join(dirpath, name)
+                print(analyze_name(name, full))
+                count += 1
+                if count >= 20:  # Limit to first 20 for testing
+                    print("\\n... (limited to first 20 entries)")
+                    break
+            if count >= 20:
+                break
+    except Exception as e:
+        print("Error during walk: " + str(e))
+        import traceback
+        print(traceback.format_exc())
+'''.format(root_repr, sample_repr)
+    
+    import base64
+    script_bytes = python_script.encode('utf-8')
+    script_b64 = base64.b64encode(script_bytes).decode('ascii')
+    
+    # Find Python executable using login shell to get proper PATH
+    find_python_with_profile = "bash -l -c 'which python 2>/dev/null || which python2 2>/dev/null || which python2.7 2>/dev/null || echo \"NOT_FOUND\"'"
+    python_path_stdout, python_path_stderr, _ = execute_ssh_command(ssh_client, find_python_with_profile)
+    python_cmd = python_path_stdout.strip() if python_path_stdout.strip() and python_path_stdout.strip() != "NOT_FOUND" else None
+    
+    if not python_cmd:
+        # Try direct paths as fallback
+        check_cmd = "for p in /usr/local/bin/python /usr/local/bin/python2 /usr/local/bin/python2.7 /usr/bin/python /usr/bin/python2 /usr/bin/python2.7 /opt/bin/python /opt/bin/python2; do if [ -x \"$p\" ] 2>/dev/null; then echo \"$p\"; break; fi; done"
+        python_path_stdout, _, _ = execute_ssh_command(ssh_client, check_cmd)
+        python_cmd = python_path_stdout.strip() if python_path_stdout.strip() else None
+    
+    if not python_cmd:
+        return "ERROR: Could not find Python executable on the remote system. Please ensure Python 2.7 is installed."
+    
+    # Execute the script with the found Python
+    cmd = "echo '{0}' | base64 -d 2>/dev/null | {1} 2>&1".format(script_b64, python_cmd)
+    stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
+    
+    # Combine stdout and stderr for debugging
+    result = f"Using Python: {python_cmd}\n\n{stdout}"
+    if stderr:
+        result += "\n=== STDERR ===\n" + stderr
+    return result
+
 def scan_bad_encoding_filenames_remote(ssh_client, share_path: str):
     """
     Scans for files/directories with non-UTF-8 encoding in their names.
@@ -702,6 +839,7 @@ def scan_bad_encoding_filenames_remote(ssh_client, share_path: str):
     python_script = '''# -*- coding: utf-8 -*-
 # This script runs on QNAP with Python 2.7
 # It must be Python 2.7 compatible (no f-strings, Python 3-only features)
+# In Python 2.7: str = bytes, unicode = text strings
 import os, sys
 
 root = {0}
@@ -709,77 +847,114 @@ root = {0}
 bad = []
 for dirpath, dirnames, filenames in os.walk(root):
     for name in dirnames + filenames:
-        if isinstance(name, str):
-            # If Python is giving str, it already decoded somehow; skip
+        # In Python 2.7, if name is unicode, it's already decoded - skip
+        # We only check str (bytes) for encoding issues
+        if isinstance(name, unicode):
             continue
+        # name is str (bytes) in Python 2.7, try to decode as UTF-8
         try:
             name.decode("utf-8", "strict")
-        except UnicodeDecodeError:
-            # Initialize variables first to avoid scoping issues
+        except (UnicodeDecodeError, UnicodeError):
+            # Bad encoding detected - initialize variables first
             inode = 0
             parent_dir = ""
             path_str = ""
             
-            # Get file info directly without helper function to avoid scoping issues
+            # Get file info - use raw bytes paths for os.path.join and os.stat
+            # This ensures we can access files with bad encoding in their names
             try:
+                # os.path.join works with bytes in Python 2.7
                 full = os.path.join(dirpath, name)
-                # Get inode
+                
+                # Get inode using raw bytes path - this should always work
                 try:
                     stat_info = os.stat(full)
                     inode = stat_info.st_ino
-                except:
+                except Exception as e:
+                    # If stat fails, try to continue without inode
                     inode = 0
                 
-                # Get parent directory
+                # Get parent directory for output
+                # Try to decode with replace to get readable text, but keep bytes as fallback
                 try:
-                    if isinstance(dirpath, bytes):
-                        parent_dir = dirpath.decode("utf-8", "backslashreplace")
+                    if isinstance(dirpath, unicode):
+                        # Already unicode, encode to bytes then decode with replace
+                        parent_dir = dirpath.encode("utf-8", "replace").decode("utf-8", "replace")
                     else:
-                        parent_dir = str(dirpath)
+                        # dirpath is str (bytes), decode with replace to handle any bad bytes
+                        parent_dir = dirpath.decode("utf-8", "replace")
                 except:
+                    # Fallback: use repr of bytes
                     try:
-                        parent_dir = str(dirpath)
+                        parent_dir = repr(dirpath)
                     except:
                         parent_dir = ""
                 
-                # Get path string
+                # Get full path string for output
+                # Use replace mode to ensure we can always decode something
                 try:
-                    if isinstance(full, bytes):
-                        path_str = full.decode("utf-8", "backslashreplace")
+                    if isinstance(full, unicode):
+                        # Already unicode, encode then decode with replace
+                        path_str = full.encode("utf-8", "replace").decode("utf-8", "replace")
                     else:
-                        path_str = str(full)
+                        # full is str (bytes), decode with replace
+                        path_str = full.decode("utf-8", "replace")
                 except:
+                    # Fallback: use repr
                     try:
-                        path_str = str(full)
+                        path_str = repr(full)
                     except:
                         path_str = ""
-            except:
-                # Fallback if os.path.join fails
+            except Exception as e:
+                # If everything fails, try minimal fallback
                 try:
-                    if isinstance(name, bytes):
-                        path_str = name.decode("utf-8", "backslashreplace")
+                    # Just use the name itself, decoded with replace
+                    if isinstance(name, unicode):
+                        path_str = name.encode("utf-8", "replace").decode("utf-8", "replace")
                     else:
-                        path_str = str(name)
-                    if isinstance(dirpath, bytes):
-                        parent_dir = dirpath.decode("utf-8", "backslashreplace")
+                        path_str = name.decode("utf-8", "replace")
+                    
+                    # Try to get parent
+                    if isinstance(dirpath, unicode):
+                        parent_dir = dirpath.encode("utf-8", "replace").decode("utf-8", "replace")
                     else:
-                        parent_dir = str(dirpath)
+                        parent_dir = dirpath.decode("utf-8", "replace")
                 except:
-                    pass
+                    # Last resort: use repr
+                    try:
+                        path_str = repr(name)
+                        parent_dir = repr(dirpath) if dirpath else ""
+                    except:
+                        pass
             
-            if path_str:  # Only print if we have a path
+            # Only output if we have at least an inode or a path
+            if inode > 0 or path_str:
                 print("{{0}}|{{1}}|{{2}}".format(inode, parent_dir, path_str))
 '''.format(root_repr)
     
     # Execute the Python 2.7 script on the remote QNAP system
-    # QNAP typically has Python 2.7 as the default 'python' command
+    # QNAP typically has Python 2.7, but the command might be in a non-standard location
     # We need to properly escape the script for shell execution
     # Use base64 encoding to avoid shell escaping issues
     import base64
     script_bytes = python_script.encode('utf-8')
     script_b64 = base64.b64encode(script_bytes).decode('ascii')
-    # Use 'python' (Python 2.7) on QNAP - the script is written to be Python 2.7 compatible
-    cmd = "echo '{0}' | base64 -d | python 2>/dev/null".format(script_b64)
+    
+    # Find Python executable using login shell to get proper PATH
+    find_python_cmd = "bash -l -c 'which python 2>/dev/null || which python2 2>/dev/null || which python2.7 2>/dev/null || echo \"NOT_FOUND\"'"
+    python_path_stdout, _, _ = execute_ssh_command(ssh_client, find_python_cmd)
+    python_cmd = python_path_stdout.strip() if python_path_stdout.strip() and python_path_stdout.strip() != "NOT_FOUND" else None
+    
+    if not python_cmd:
+        # Try direct paths as fallback
+        check_cmd = "for p in /usr/local/bin/python /usr/local/bin/python2 /usr/local/bin/python2.7 /usr/bin/python /usr/bin/python2 /usr/bin/python2.7 /opt/bin/python /opt/bin/python2; do if [ -x \"$p\" ] 2>/dev/null; then echo \"$p\"; break; fi; done"
+        python_path_stdout, _, _ = execute_ssh_command(ssh_client, check_cmd)
+        python_cmd = python_path_stdout.strip() if python_path_stdout.strip() else None
+    
+    if not python_cmd:
+        raise Exception("Python 2.7 is required but not found on the remote system.")
+    
+    cmd = "echo '{0}' | base64 -d 2>/dev/null | {1} 2>&1".format(script_b64, python_cmd)
     stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
     
     rename_list = []
@@ -877,25 +1052,56 @@ root = {0}
 illegal_chars = {1}
 
 results = []
+# Unicode replacement character (U+FFFD) - appears as ? when bad encoding is decoded
+REPLACEMENT_CHAR = u'\ufffd'
 for dirpath, dirnames, filenames in os.walk(root):
     for name in dirnames + filenames:
-        # Check for illegal characters
+        # Convert name to unicode if it's bytes, for consistent checking
+        if isinstance(name, str):  # str is bytes in Python 2.7
+            try:
+                name_unicode = name.decode("utf-8", "replace")
+            except:
+                name_unicode = unicode(name, "utf-8", "replace")
+        else:
+            name_unicode = name
+        
+        # Check for illegal characters (convert to unicode for comparison)
         has_illegal = False
         for char in illegal_chars:
-            if char in name:
+            # Convert char to unicode if needed
+            char_unicode = char if isinstance(char, unicode) else unicode(char, "utf-8", "replace")
+            if char_unicode in name_unicode:
                 has_illegal = True
                 break
         
-        # Check for leading or trailing spaces
-        has_spaces = (name.startswith(' ') or name.endswith(' '))
+        # Check for Unicode replacement character (indicates bad encoding was decoded)
+        has_replacement_char = REPLACEMENT_CHAR in name_unicode
         
-        if has_illegal or has_spaces:
+        # Check for leading or trailing spaces
+        has_spaces = (name_unicode.startswith(' ') or name_unicode.endswith(' '))
+        
+        if has_illegal or has_spaces or has_replacement_char:
             try:
                 full = os.path.join(dirpath, name)
                 stat_info = os.stat(full)
                 inode = stat_info.st_ino
-                parent_dir = dirpath.decode("utf-8", "backslashreplace") if isinstance(dirpath, bytes) else str(dirpath)
-                path_str = full.decode("utf-8", "backslashreplace") if isinstance(full, bytes) else str(full)
+                # Get parent dir and path as unicode for output
+                if isinstance(dirpath, str):  # str is bytes in Python 2.7
+                    try:
+                        parent_dir = dirpath.decode("utf-8", "replace")
+                    except:
+                        parent_dir = unicode(dirpath, "utf-8", "replace")
+                else:
+                    parent_dir = unicode(dirpath)
+                
+                if isinstance(full, str):  # str is bytes in Python 2.7
+                    try:
+                        path_str = full.decode("utf-8", "replace")
+                    except:
+                        path_str = unicode(full, "utf-8", "replace")
+                else:
+                    path_str = unicode(full)
+                
                 results.append("{{0}}|{{1}}|{{2}}".format(inode, parent_dir, path_str))
             except:
                 pass
@@ -908,7 +1114,22 @@ for r in results:
     import base64
     script_bytes = python_script.encode('utf-8')
     script_b64 = base64.b64encode(script_bytes).decode('ascii')
-    cmd = "echo '{0}' | base64 -d | python 2>/dev/null".format(script_b64)
+    
+    # Find Python executable using login shell to get proper PATH
+    find_python_cmd = "bash -l -c 'which python 2>/dev/null || which python2 2>/dev/null || which python2.7 2>/dev/null || echo \"NOT_FOUND\"'"
+    python_path_stdout, _, _ = execute_ssh_command(ssh_client, find_python_cmd)
+    python_cmd = python_path_stdout.strip() if python_path_stdout.strip() and python_path_stdout.strip() != "NOT_FOUND" else None
+    
+    if not python_cmd:
+        # Try direct paths as fallback
+        check_cmd = "for p in /usr/local/bin/python /usr/local/bin/python2 /usr/local/bin/python2.7 /usr/bin/python /usr/bin/python2 /usr/bin/python2.7 /opt/bin/python /opt/bin/python2; do if [ -x \"$p\" ] 2>/dev/null; then echo \"$p\"; break; fi; done"
+        python_path_stdout, _, _ = execute_ssh_command(ssh_client, check_cmd)
+        python_cmd = python_path_stdout.strip() if python_path_stdout.strip() else None
+    
+    if not python_cmd:
+        raise Exception("Python 2.7 is required but not found on the remote system.")
+    
+    cmd = "echo '{0}' | base64 -d 2>/dev/null | {1} 2>&1".format(script_b64, python_cmd)
     stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
     
     if stdout.strip():
@@ -1049,20 +1270,21 @@ def generate_categorized_cleanup_scripts(
             f.write(f"# Target path: {share_path}\n")
             f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             f.write("set -e  # Exit on error\n\n")
-            f.write("echo \"=== Listing files/directories to rename ===\"\n")
-            # Format: (parent_dir, inode, original_path, sanitized_path)
-            for parent_dir, inode, orig_path, new_path in problematic_filenames:
-                f.write(f"# {orig_path} -> {new_path} (inode: {inode})\n")
-            f.write("\necho \"=== Renaming files/directories ===\"\n")
+            f.write("echo \"=== Renaming files/directories ===\"\n")
             for parent_dir, inode, orig_path, new_path in problematic_filenames:
                 # Extract just the new basename
                 new_basename = os.path.basename(new_path)
-                # Construct the full new path
-                new_full_path = os.path.join(parent_dir, new_basename) if parent_dir and parent_dir != '.' else new_basename
-                # Use find with inode to locate the file/directory, then rename it
-                # This works even with non-UTF-8 filenames
+                # Use Python script to rename by inode - this avoids any filename interpretation
+                # Python can handle raw bytes from the filesystem
                 f.write(f"# Renaming: {orig_path} -> {new_path}\n")
-                f.write(f"find {escape_shell_path(parent_dir)} -maxdepth 1 -inum {inode} -exec sh -c 'mv \"$1\" {escape_shell_path(new_full_path)}' _ {{}} \\; 2>/dev/null || echo \"Warning: Could not rename (inode {inode})\"\n")
+                # Use Python to find file by inode in parent_dir and rename it
+                # This avoids any shell interpretation of problematic filenames
+                escaped_parent = parent_dir.replace("'", "'\\''").replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
+                escaped_basename = new_basename.replace("'", "'\\''").replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
+                # Python 2.7 compatible script: iterate directory, match by inode, rename
+                python_script = f"import os; d='{escaped_parent}'; n='{escaped_basename}'; i={inode}; [os.rename(os.path.join(d, f), os.path.join(d, n)) for f in os.listdir(d) if os.path.exists(os.path.join(d, f)) and os.stat(os.path.join(d, f)).st_ino == i]"
+                escaped_python = python_script.replace("'", "'\\''")
+                f.write(f"python -c '{escaped_python}' 2>/dev/null || echo \"Warning: Could not rename (inode {inode})\"\n")
             f.write("\necho \"=== Filename sanitization complete ===\"\n")
         os.chmod(script_path, 0o755)
         scripts_generated.append(script_path)
@@ -1100,6 +1322,7 @@ def generate_categorized_cleanup_scripts(
         scripts_generated.append(script_path)
     
     # 4. folders_to_delete.sh (do this AFTER renaming to avoid issues with invalid chars)
+    # Since this runs after renaming, folder names should be clean, so we can use simple rmdir
     if has_empty_folders:
         script_path = os.path.join(output_dir, 'folders_to_delete.sh')
         with open(script_path, 'w', encoding='utf-8') as f:
@@ -1108,12 +1331,11 @@ def generate_categorized_cleanup_scripts(
             f.write(f"# Target path: {share_path}\n")
             f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             f.write("echo \"=== Deleting empty folders ===\"\n")
-            # Write inode-based rmdir commands for each folder (sorted deepest first for safe deletion)
+            # Write simple rmdir commands for each folder (sorted deepest first for safe deletion)
             # Format: (parent_dir, inode, path)
+            # Note: Since this runs after renaming, paths should be clean and we can use them directly
             for parent_dir, inode, folder_path in empty_folders:
-                # Use find with inode to locate and delete the folder
-                # This works even with non-UTF-8 folder names
-                f.write(f"find {escape_shell_path(parent_dir)} -maxdepth 1 -inum {inode} -type d -exec rmdir {{}} \\; 2>/dev/null || echo \"Warning: Could not remove folder (inode {inode}, may no longer be empty)\"\n")
+                f.write(f"rmdir {escape_shell_path(folder_path)} 2>/dev/null || echo \"Warning: Could not remove {folder_path} (may no longer be empty)\"\n")
             f.write("\necho \"=== Empty folder cleanup complete ===\"\n")
         os.chmod(script_path, 0o755)
         scripts_generated.append(script_path)
@@ -1156,31 +1378,51 @@ def main():
         parser.add_argument("--cleanup-filenames", action="store_true", help="Enable filename character replacement scan (illegal chars and bad encoding).")
         parser.add_argument("--exclude-folder", default="*.fcpbundle", help="Comma-separated list of folder name patterns to exclude from empty folder cleanup (default: '*.fcpbundle' - matches folders ending with .fcpbundle).")
         parser.add_argument("--output-dir", help="Directory for generated scripts (default: qnap_cleanup_YYYYMMDD_HHMMSS/).")
+        parser.add_argument("--debug-filename-bytes", help="Debug: Export raw bytes of filenames for encoding analysis. Provide a specific path to analyze, or leave empty to analyze all files in share-path.")
         
         args = parser.parse_args()
 
         # Route to appropriate mode
         if args.remote_mode:
             # Remote SSH mode
-            if not args.ssh_host or not args.ssh_user or not args.ssh_key or not args.share_path or not args.share_owner:
-                parser.error("Remote mode requires: --ssh-host, --ssh-user, --ssh-key, --share-path, and --share-owner")
+            # Debug mode doesn't require share-owner
+            if args.debug_filename_bytes is None:
+                if not args.ssh_host or not args.ssh_user or not args.ssh_key or not args.share_path or not args.share_owner:
+                    parser.error("Remote mode requires: --ssh-host, --ssh-user, --ssh-key, --share-path, and --share-owner")
+            else:
+                if not args.ssh_host or not args.ssh_user or not args.ssh_key or not args.share_path:
+                    parser.error("Debug mode requires: --ssh-host, --ssh-user, --ssh-key, and --share-path")
             
-            # Determine which cleanup operations to perform
-            do_permissions = args.cleanup_all or args.cleanup_permissions
-            do_empty_folders = args.cleanup_all or args.cleanup_empty_folders
-            do_legacy_files = args.cleanup_all or args.cleanup_legacy_files
-            do_filenames = args.cleanup_all or args.cleanup_filenames
+            # Determine which cleanup operations to perform (skip if in debug mode)
+            if args.debug_filename_bytes is None:
+                do_permissions = args.cleanup_all or args.cleanup_permissions
+                do_empty_folders = args.cleanup_all or args.cleanup_empty_folders
+                do_legacy_files = args.cleanup_all or args.cleanup_legacy_files
+                do_filenames = args.cleanup_all or args.cleanup_filenames
+                
+                if not (do_permissions or do_empty_folders or do_legacy_files or do_filenames):
+                    parser.error("Remote mode requires at least one cleanup operation (use --cleanup-all or specific --cleanup-* flags)")
+            else:
+                do_permissions = False
+                do_empty_folders = False
+                do_legacy_files = False
+                do_filenames = False
             
-            if not (do_permissions or do_empty_folders or do_legacy_files or do_filenames):
-                parser.error("Remote mode requires at least one cleanup operation (use --cleanup-all or specific --cleanup-* flags)")
-            
-            exclude_patterns = [p.strip() for p in args.exclude_folder.split(',')]
+            exclude_patterns = [p.strip() for p in args.exclude_folder.split(',')] if args.debug_filename_bytes is None else []
             
             print(f"Connecting to {args.ssh_host}...")
             ssh_client = connect_ssh(args.ssh_host, args.ssh_user, args.ssh_key, args.ssh_port)
             print("Connected successfully.\n")
             
             try:
+                # Debug mode: export filename bytes for analysis
+                if args.debug_filename_bytes is not None:
+                    print("=== Debug: Analyzing filename bytes ===\n")
+                    sample_path = args.debug_filename_bytes if args.debug_filename_bytes else None
+                    output = debug_filename_bytes_remote(ssh_client, args.share_path, sample_path)
+                    print(output)
+                    return
+                
                 permission_issues = None
                 empty_folders = None
                 legacy_files = None
