@@ -49,7 +49,7 @@ tf = TimezoneFinder()
 
 # Illegal characters for file/folder names (includes Windows-illegal characters)
 # These will be replaced with underscore when sanitizing filenames
-ILLEGAL_FILENAME_CHARS = ['?', ';', ':', '~', '!', '$', '/', '\\', '*', '"', '<', '>', '|']
+ILLEGAL_FILENAME_CHARS = ['?', ';', ':', '!', '$', '/', '\\', '*', '"', '<', '>', '|']
 
 def find_files_by_extension(directory_path: str, extensions: list[str]) -> list[str]:
     """
@@ -577,7 +577,20 @@ def scan_empty_folders_remote(ssh_client, share_path: str, exclude_patterns: lis
     import os.path
     
     # Build exclude pattern for find command (supports wildcards like *.fcpbundle)
-    exclude_args = ' '.join([f"-not -name '{pattern}'" for pattern in exclude_patterns])
+    # Use -path instead of -name to exclude any path containing the pattern (not just the basename)
+    # Convert pattern like "*.fcpbundle" to match both the directory itself and anything inside it
+    exclude_args_list = []
+    for pattern in exclude_patterns:
+        # Convert basename pattern to path patterns
+        # "*.fcpbundle" becomes:
+        #   - "*/*.fcpbundle" to match the directory itself
+        #   - "*/*.fcpbundle/*" to match anything inside the directory
+        # We exclude if path matches EITHER pattern (using -o for OR)
+        path_pattern1 = f"*/*{pattern}"  # Matches the directory itself
+        path_pattern2 = f"*/*{pattern}/*"  # Matches anything inside the directory
+        # Use -not with OR: exclude if path matches pattern1 OR pattern2
+        exclude_args_list.append(f"-not \\( -path '{path_pattern1}' -o -path '{path_pattern2}' \\)")
+    exclude_args = ' '.join(exclude_args_list)
     
     # Find empty directories and get their inodes
     # Format: inode|parent_dir|path
@@ -622,10 +635,10 @@ def scan_legacy_files_remote(ssh_client, share_path: str):
         'resource_forks': []
     }
     
-    # Windows cache files
+    # Windows cache files (case-insensitive search to catch all variants)
     cache_files = ['Thumbs.db', 'ehthumbs.db', 'ehthumbs_vista.db', 'Desktop.ini', 'IconCache.db']
     for cache_file in cache_files:
-        cmd = f"find '{share_path}' -type f -name '{cache_file}' 2>/dev/null"
+        cmd = f"find '{share_path}' -type f -iname '{cache_file}' 2>/dev/null"
         stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
         if stdout.strip():
             results['files'].extend([line.strip() for line in stdout.strip().split('\n') if line.strip()])
@@ -807,7 +820,7 @@ else:
         result += "\n=== STDERR ===\n" + stderr
     return result
 
-def scan_bad_encoding_filenames_remote(ssh_client, share_path: str):
+def scan_bad_encoding_filenames_remote(ssh_client, share_path: str, exclude_patterns: list = None):
     """
     Scans for files/directories with non-UTF-8 encoding in their names.
     Uses a Python script on the remote side to detect encoding issues, similar to the user's example.
@@ -818,11 +831,13 @@ def scan_bad_encoding_filenames_remote(ssh_client, share_path: str):
     Args:
         ssh_client: SSHClient instance
         share_path: Path to the share root
+        exclude_patterns: List of folder name patterns to exclude (e.g., ['*.fcpbundle'])
     
     Returns:
         List of tuples: (parent_dir, inode, original_path, sanitized_path)
         Using inode ensures we can handle non-UTF-8 filenames
     """
+    exclude_patterns = exclude_patterns or []
     import os.path
     import hashlib
     
@@ -834,15 +849,42 @@ def scan_bad_encoding_filenames_remote(ssh_client, share_path: str):
     share_path_bytes = share_path.encode('utf-8')
     # Format as bytes literal for the Python script
     root_repr = repr(share_path_bytes)
+    # Convert exclude patterns to a format the Python script can use
+    exclude_patterns_repr = repr(exclude_patterns)
     # Python 2.7 compatible script (no f-strings, use .format() instead)
     # Note: We use .format() here because this is a Python 3 f-string that generates Python 2.7 code
     python_script = '''# -*- coding: utf-8 -*-
 # This script runs on QNAP with Python 2.7
 # It must be Python 2.7 compatible (no f-strings, Python 3-only features)
 # In Python 2.7: str = bytes, unicode = text strings
-import os, sys
+import os, sys, fnmatch
 
 root = {0}
+exclude_patterns = {1}
+
+def should_exclude_path(path_str):
+    """Check if path should be excluded based on exclude_patterns"""
+    if not exclude_patterns:
+        return False
+    # Convert path to unicode if needed
+    if isinstance(path_str, str):  # str is bytes in Python 2.7
+        try:
+            path_unicode = path_str.decode("utf-8", "replace")
+        except:
+            path_unicode = unicode(path_str, "utf-8", "replace")
+    else:
+        path_unicode = path_str
+    
+    # Check if any part of the path matches an exclude pattern
+    # Split path into components and check each directory name
+    path_parts = path_unicode.split(os.sep)
+    for part in path_parts:
+        for pattern in exclude_patterns:
+            # Convert pattern to unicode if needed
+            pattern_unicode = pattern if isinstance(pattern, unicode) else unicode(pattern, "utf-8", "replace")
+            if fnmatch.fnmatch(part, pattern_unicode):
+                return True
+    return False
 
 # Use os.listdir() recursively - EXACTLY like debug script does when given a specific directory
 # Debug script: for item in os.listdir(sample_path): ... analyze_name(item, item_path)
@@ -860,6 +902,18 @@ def scan_dir(directory):
                 is_dir = os.path.isdir(full_path)
             except:
                 continue
+            
+            # Check if path should be excluded
+            try:
+                if isinstance(full_path, unicode):
+                    path_for_check = full_path
+                else:
+                    path_for_check = full_path.decode("utf-8", "replace")
+                if should_exclude_path(path_for_check):
+                    # Skip this path and don't recurse into it
+                    continue
+            except:
+                pass
             
             # Check for bad encoding - EXACTLY like debug script's analyze_name
             # Debug script: if isinstance(name, unicode): check replacement char, else: try decode("utf-8", "strict")
@@ -934,7 +988,7 @@ except Exception as e:
     import traceback
     sys.stderr.write("Error: " + str(e) + "\\n")
     sys.stderr.write(traceback.format_exc())
-'''.format(root_repr)
+'''.format(root_repr, exclude_patterns_repr)
     
     # Execute the Python 2.7 script on the remote QNAP system
     # QNAP typically has Python 2.7, but the command might be in a non-standard location
@@ -1040,7 +1094,7 @@ except Exception as e:
     
     return rename_list
 
-def scan_problematic_filenames_remote(ssh_client, share_path: str):
+def scan_problematic_filenames_remote(ssh_client, share_path: str, exclude_patterns: list = None):
     """
     Scans for files/directories containing illegal characters, leading/trailing spaces, or bad encoding.
     Replaces illegal characters with underscore, trims spaces, and fixes encoding issues.
@@ -1048,11 +1102,13 @@ def scan_problematic_filenames_remote(ssh_client, share_path: str):
     Args:
         ssh_client: SSHClient instance
         share_path: Path to the share root
+        exclude_patterns: List of folder name patterns to exclude (e.g., ['*.fcpbundle'])
     
     Returns:
         List of tuples: (parent_dir, inode, original_path, sanitized_path)
         Using inode ensures we can handle non-UTF-8 filenames
     """
+    exclude_patterns = exclude_patterns or []
     import os.path
     
     rename_list = []
@@ -1063,18 +1119,57 @@ def scan_problematic_filenames_remote(ssh_client, share_path: str):
     root_repr = repr(share_path_bytes)
     # Python 2.7 compatible script to find illegal characters
     illegal_chars_repr = repr(ILLEGAL_FILENAME_CHARS)
+    exclude_patterns_repr = repr(exclude_patterns)
     python_script = '''# -*- coding: utf-8 -*-
 # This script runs on QNAP with Python 2.7
 # Scans for files/directories with illegal characters or leading/trailing spaces
-import os, sys
+import os, sys, fnmatch
 
 root = {0}
 illegal_chars = {1}
+exclude_patterns = {2}
+
+def should_exclude_path(path_str):
+    """Check if path should be excluded based on exclude_patterns"""
+    if not exclude_patterns:
+        return False
+    # Convert path to unicode if needed
+    if isinstance(path_str, str):  # str is bytes in Python 2.7
+        try:
+            path_unicode = path_str.decode("utf-8", "replace")
+        except:
+            path_unicode = unicode(path_str, "utf-8", "replace")
+    else:
+        path_unicode = path_str
+    
+    # Check if any part of the path matches an exclude pattern
+    # Split path into components and check each directory name
+    path_parts = path_unicode.split(os.sep)
+    for part in path_parts:
+        for pattern in exclude_patterns:
+            # Convert pattern to unicode if needed
+            pattern_unicode = pattern if isinstance(pattern, unicode) else unicode(pattern, "utf-8", "replace")
+            if fnmatch.fnmatch(part, pattern_unicode):
+                return True
+    return False
 
 results = []
 # Unicode replacement character (U+FFFD) - appears as ? when bad encoding is decoded
 REPLACEMENT_CHAR = u'\ufffd'
 for dirpath, dirnames, filenames in os.walk(root):
+    # Check if current directory should be excluded
+    try:
+        if isinstance(dirpath, unicode):
+            dirpath_for_check = dirpath
+        else:
+            dirpath_for_check = dirpath.decode("utf-8", "replace")
+        if should_exclude_path(dirpath_for_check):
+            # Skip this directory entirely
+            dirnames[:] = []  # Don't recurse into subdirectories
+            continue
+    except:
+        pass
+    
     for name in dirnames + filenames:
         # Convert name to unicode if it's bytes, for consistent checking
         if isinstance(name, str):  # str is bytes in Python 2.7
@@ -1128,7 +1223,7 @@ for dirpath, dirnames, filenames in os.walk(root):
 
 for r in results:
     print(r)
-'''.format(root_repr, illegal_chars_repr)
+'''.format(root_repr, illegal_chars_repr, exclude_patterns_repr)
     
     # Execute the Python 2.7 script on the remote QNAP system
     import base64
@@ -1184,7 +1279,7 @@ for r in results:
                 continue
     
     # 2. Scan for bad encoding (non-UTF-8 filenames)
-    bad_encoding_list = scan_bad_encoding_filenames_remote(ssh_client, share_path)
+    bad_encoding_list = scan_bad_encoding_filenames_remote(ssh_client, share_path, exclude_patterns)
     
     # Merge the two lists, avoiding duplicates by inode
     existing_inodes = {(dir_name, inode) for dir_name, inode, _, _ in rename_list}
@@ -1455,7 +1550,7 @@ def main():
                 
                 if do_filenames:
                     print("Scanning for problematic filenames (illegal characters and bad encoding)...")
-                    problematic_filenames = scan_problematic_filenames_remote(ssh_client, args.share_path)
+                    problematic_filenames = scan_problematic_filenames_remote(ssh_client, args.share_path, exclude_patterns)
                     print(f"Found {len(problematic_filenames)} files/directories with problematic characters or bad encoding.\n")
                 
                 if do_legacy_files:

@@ -196,7 +196,7 @@ class App(tk.Tk):
         ttk.Checkbutton(self.remote_cleanup_frame, text="Delete empty folders", variable=self.cleanup_empty_folders_var).pack(anchor=tk.W)
         
         ttk.Label(self.remote_cleanup_frame, text="Exclude folders:").pack(anchor=tk.W, pady=(10, 0))
-        self.exclude_folder_var = tk.StringVar(value=".fcpbundle")
+        self.exclude_folder_var = tk.StringVar(value="*.fcpbundle")
         ttk.Entry(self.remote_cleanup_frame, textvariable=self.exclude_folder_var, width=30).pack(anchor=tk.W, fill=tk.X)
 
         # --- Command Preview ---
@@ -527,7 +527,7 @@ class App(tk.Tk):
                     if params["cleanup_filenames"]:
                         self.queue.put("Scanning for problematic filenames (illegal characters and bad encoding)...\n")
                         problematic_filenames = scan_problematic_filenames_remote(
-                            ssh_client, params["share_path"]
+                            ssh_client, params["share_path"], params["exclude_folder"]
                         )
                         self.queue.put(f"Found {len(problematic_filenames)} files/directories with problematic characters or bad encoding.\n\n")
                     
