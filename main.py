@@ -476,61 +476,35 @@ def flatten_directory(folder_path: str, dry_run: bool = False):
 # ============================================================================
 
 
-def connect_ssh(host: str, username: str, key_file: str, port: int = 22):
+def execute_ssh_command(ssh_config_host: str, command: str):
     """
-    Establishes SSH connection using paramiko. Uses key-based authentication only.
+    Executes a remote command via SSH using a host alias from SSH config.
+    The SSH command automatically loads and uses ~/.ssh/config.
     
     Args:
-        host: QNAP hostname or IP address
-        username: SSH username
-        key_file: Path to SSH private key file
-        port: SSH port (default: 22)
-    
-    Returns:
-        SSHClient instance
-    """
-    import paramiko
-    
-    if not os.path.exists(key_file):
-        raise Exception(f"SSH key file not found: {key_file}")
-    
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    
-    try:
-        ssh.connect(hostname=host, username=username, key_filename=key_file, port=port, timeout=30)
-        return ssh
-    except Exception as e:
-        raise Exception(f"Failed to connect via SSH: {e}") from e
-
-def execute_ssh_command(ssh_client, command: str):
-    """
-    Executes a remote command and returns stdout, stderr, and exit code.
-    
-    Args:
-        ssh_client: SSHClient instance
+        ssh_config_host: Host alias from ~/.ssh/config
         command: Command to execute
     
     Returns:
         tuple: (stdout, stderr, exit_code)
     """
+    import subprocess
+    
     try:
-        stdin, stdout, stderr = ssh_client.exec_command(command, timeout=300)
-        exit_code = stdout.channel.recv_exit_status()
-        stdout_text = stdout.read().decode('utf-8', errors='replace')
-        stderr_text = stderr.read().decode('utf-8', errors='replace')
-        return stdout_text, stderr_text, exit_code
+        result = subprocess.run(
+            ['ssh', ssh_config_host, command],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False
+        )
+        return result.stdout, result.stderr, result.returncode
+    except subprocess.TimeoutExpired:
+        raise Exception(f"SSH command timed out after 300 seconds")
     except Exception as e:
         raise Exception(f"Failed to execute SSH command: {e}") from e
 
-def disconnect_ssh(ssh_client):
-    """Closes SSH connection safely."""
-    try:
-        ssh_client.close()
-    except Exception:
-        pass
-
-def scan_permission_issues(ssh_client, share_path: str, username: str):
+def scan_permission_issues(ssh_config_host: str, share_path: str, username: str):
     """
     Scans for permission issues: wrong ownership (files and directories).
     
@@ -549,19 +523,19 @@ def scan_permission_issues(ssh_client, share_path: str, username: str):
     
     # Find files with wrong ownership
     cmd = f"find '{share_path}' -type f -not -user {username} 2>/dev/null"
-    stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
+    stdout, stderr, exit_code = execute_ssh_command(ssh_config_host, cmd)
     if stdout.strip():
         results['wrong_owner_files'] = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
     
     # Find directories with wrong ownership
     cmd = f"find '{share_path}' -type d -mindepth 1 -not -user {username} 2>/dev/null"
-    stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
+    stdout, stderr, exit_code = execute_ssh_command(ssh_config_host, cmd)
     if stdout.strip():
         results['wrong_owner_dirs'] = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
     
     return results
 
-def scan_empty_folders_remote(ssh_client, share_path: str, exclude_patterns: list):
+def scan_empty_folders_remote(ssh_config_host: str, share_path: str, exclude_patterns: list):
     """
     Scans for empty directories, excluding specified patterns.
     
@@ -595,7 +569,7 @@ def scan_empty_folders_remote(ssh_client, share_path: str, exclude_patterns: lis
     # Find empty directories and get their inodes
     # Format: inode|parent_dir|path
     cmd = f"find '{share_path}' -type d -mindepth 1 {exclude_args} -exec sh -c 'if [ -z \"$(ls -A \"$1\" 2>/dev/null)\" ]; then echo \"$(stat -c %i \"$1\" 2>/dev/null)|$(dirname \"$1\")|$1\"; fi' sh {{}} \\; 2>/dev/null"
-    stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
+    stdout, stderr, exit_code = execute_ssh_command(ssh_config_host, cmd)
     
     empty_folders = []
     if stdout.strip():
@@ -618,7 +592,7 @@ def scan_empty_folders_remote(ssh_client, share_path: str, exclude_patterns: lis
     
     return empty_folders
 
-def scan_legacy_files_remote(ssh_client, share_path: str):
+def scan_legacy_files_remote(ssh_config_host: str, share_path: str):
     """
     Scans for legacy files and directories to delete.
     
@@ -639,27 +613,27 @@ def scan_legacy_files_remote(ssh_client, share_path: str):
     cache_files = ['Thumbs.db', 'ehthumbs.db', 'ehthumbs_vista.db', 'Desktop.ini', 'IconCache.db']
     for cache_file in cache_files:
         cmd = f"find '{share_path}' -type f -iname '{cache_file}' 2>/dev/null"
-        stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
+        stdout, stderr, exit_code = execute_ssh_command(ssh_config_host, cmd)
         if stdout.strip():
             results['files'].extend([line.strip() for line in stdout.strip().split('\n') if line.strip()])
     
     # .@__thumb directories
     cmd = f"find '{share_path}' -type d -name '.@__thumb' 2>/dev/null"
-    stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
+    stdout, stderr, exit_code = execute_ssh_command(ssh_config_host, cmd)
     if stdout.strip():
         results['directories'].extend([line.strip() for line in stdout.strip().split('\n') if line.strip()])
     
     # .streams folder at root only
     streams_path = share_path.rstrip('/') + '/.streams'
     cmd = f"if [ -d '{streams_path}' ]; then echo '{streams_path}'; fi 2>/dev/null"
-    stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
+    stdout, stderr, exit_code = execute_ssh_command(ssh_config_host, cmd)
     if stdout.strip():
         results['directories'].append(stdout.strip())
     
     # ._* resource fork files (only if matching non-prefixed file exists)
     # Use a bash script to check both conditions in one pass
     cmd = f"find '{share_path}' -type f -name '._*' 2>/dev/null | while read rf_file; do dir_path=$(dirname \"$rf_file\"); base_name=$(basename \"$rf_file\"); matching_name=\"${{base_name#._}}\"; if [ \"$matching_name\" != \"$base_name\" ]; then matching_path=\"$dir_path/$matching_name\"; if [ -f \"$matching_path\" ]; then echo \"$rf_file\"; fi; fi; done"
-    stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
+    stdout, stderr, exit_code = execute_ssh_command(ssh_config_host, cmd)
     if stdout.strip():
         results['resource_forks'].extend([line.strip() for line in stdout.strip().split('\n') if line.strip()])
     
@@ -683,13 +657,13 @@ def sanitize_filename(basename: str) -> str:
     sanitized = sanitized.strip()
     return sanitized
 
-def debug_filename_bytes_remote(ssh_client, share_path: str, sample_path: str = None):
+def debug_filename_bytes_remote(ssh_config_host: str, share_path: str, sample_path: str = None):
     """
     Debug function to export raw bytes of filenames for analysis.
     This helps diagnose encoding issues by showing the actual bytes.
     
     Args:
-        ssh_client: SSHClient instance
+        ssh_config_host: Host alias from ~/.ssh/config
         share_path: Path to the share root
         sample_path: Optional specific path to analyze (if None, analyzes all)
     
@@ -798,13 +772,13 @@ else:
     
     # Find Python executable using login shell to get proper PATH
     find_python_with_profile = "bash -l -c 'which python 2>/dev/null || which python2 2>/dev/null || which python2.7 2>/dev/null || echo \"NOT_FOUND\"'"
-    python_path_stdout, python_path_stderr, _ = execute_ssh_command(ssh_client, find_python_with_profile)
+    python_path_stdout, python_path_stderr, _ = execute_ssh_command(ssh_config_host, find_python_with_profile)
     python_cmd = python_path_stdout.strip() if python_path_stdout.strip() and python_path_stdout.strip() != "NOT_FOUND" else None
     
     if not python_cmd:
         # Try direct paths as fallback
         check_cmd = "for p in /usr/local/bin/python /usr/local/bin/python2 /usr/local/bin/python2.7 /usr/bin/python /usr/bin/python2 /usr/bin/python2.7 /opt/bin/python /opt/bin/python2; do if [ -x \"$p\" ] 2>/dev/null; then echo \"$p\"; break; fi; done"
-        python_path_stdout, _, _ = execute_ssh_command(ssh_client, check_cmd)
+        python_path_stdout, _, _ = execute_ssh_command(ssh_config_host, check_cmd)
         python_cmd = python_path_stdout.strip() if python_path_stdout.strip() else None
     
     if not python_cmd:
@@ -812,7 +786,7 @@ else:
     
     # Execute the script with the found Python
     cmd = "echo '{0}' | base64 -d 2>/dev/null | {1} 2>&1".format(script_b64, python_cmd)
-    stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
+    stdout, stderr, exit_code = execute_ssh_command(ssh_config_host, cmd)
     
     # Combine stdout and stderr for debugging
     result = f"Using Python: {python_cmd}\n\n{stdout}"
@@ -820,7 +794,7 @@ else:
         result += "\n=== STDERR ===\n" + stderr
     return result
 
-def scan_bad_encoding_filenames_remote(ssh_client, share_path: str, exclude_patterns: list = None):
+def scan_bad_encoding_filenames_remote(ssh_config_host: str, share_path: str, exclude_patterns: list = None):
     """
     Scans for files/directories with non-UTF-8 encoding in their names.
     Uses a Python script on the remote side to detect encoding issues, similar to the user's example.
@@ -829,7 +803,7 @@ def scan_bad_encoding_filenames_remote(ssh_client, share_path: str, exclude_patt
     This local function uses Python 3, but generates Python 2.7 compatible code for remote execution.
     
     Args:
-        ssh_client: SSHClient instance
+        ssh_config_host: Host alias from ~/.ssh/config
         share_path: Path to the share root
         exclude_patterns: List of folder name patterns to exclude (e.g., ['*.fcpbundle'])
     
@@ -1000,20 +974,20 @@ except Exception as e:
     
     # Find Python executable using login shell to get proper PATH
     find_python_cmd = "bash -l -c 'which python 2>/dev/null || which python2 2>/dev/null || which python2.7 2>/dev/null || echo \"NOT_FOUND\"'"
-    python_path_stdout, _, _ = execute_ssh_command(ssh_client, find_python_cmd)
+    python_path_stdout, _, _ = execute_ssh_command(ssh_config_host, find_python_cmd)
     python_cmd = python_path_stdout.strip() if python_path_stdout.strip() and python_path_stdout.strip() != "NOT_FOUND" else None
     
     if not python_cmd:
         # Try direct paths as fallback
         check_cmd = "for p in /usr/local/bin/python /usr/local/bin/python2 /usr/local/bin/python2.7 /usr/bin/python /usr/bin/python2 /usr/bin/python2.7 /opt/bin/python /opt/bin/python2; do if [ -x \"$p\" ] 2>/dev/null; then echo \"$p\"; break; fi; done"
-        python_path_stdout, _, _ = execute_ssh_command(ssh_client, check_cmd)
+        python_path_stdout, _, _ = execute_ssh_command(ssh_config_host, check_cmd)
         python_cmd = python_path_stdout.strip() if python_path_stdout.strip() else None
     
     if not python_cmd:
         raise Exception("Python 2.7 is required but not found on the remote system.")
     
     cmd = "echo '{0}' | base64 -d 2>/dev/null | {1} 2>&1".format(script_b64, python_cmd)
-    stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
+    stdout, stderr, exit_code = execute_ssh_command(ssh_config_host, cmd)
     
     # Debug output is in stdout (because of 2>&1), separate it from actual results
     debug_lines = []
@@ -1050,7 +1024,7 @@ except Exception as e:
                 if inode is None or inode == 0:
                     # Try to get inode using find with the parent directory
                     cmd = f"find '{dir_name}' -maxdepth 1 -name '*' -exec sh -c 'for f; do if [ \"$(stat -c %i \"$f\" 2>/dev/null)\" ]; then echo \"$(stat -c %i \"$f\" 2>/dev/null)|$f\"; fi; done' _ {{}} \\; 2>/dev/null | grep -F '{path}' | head -1"
-                    stdout2, stderr2, exit_code2 = execute_ssh_command(ssh_client, cmd)
+                    stdout2, stderr2, exit_code2 = execute_ssh_command(ssh_config_host, cmd)
                     if stdout2.strip():
                         try:
                             inode_str, _ = stdout2.strip().split('|', 1)
@@ -1094,13 +1068,13 @@ except Exception as e:
     
     return rename_list
 
-def scan_problematic_filenames_remote(ssh_client, share_path: str, exclude_patterns: list = None):
+def scan_problematic_filenames_remote(ssh_config_host: str, share_path: str, exclude_patterns: list = None):
     """
     Scans for files/directories containing illegal characters, leading/trailing spaces, or bad encoding.
     Replaces illegal characters with underscore, trims spaces, and fixes encoding issues.
     
     Args:
-        ssh_client: SSHClient instance
+        ssh_config_host: Host alias from ~/.ssh/config
         share_path: Path to the share root
         exclude_patterns: List of folder name patterns to exclude (e.g., ['*.fcpbundle'])
     
@@ -1232,20 +1206,20 @@ for r in results:
     
     # Find Python executable using login shell to get proper PATH
     find_python_cmd = "bash -l -c 'which python 2>/dev/null || which python2 2>/dev/null || which python2.7 2>/dev/null || echo \"NOT_FOUND\"'"
-    python_path_stdout, _, _ = execute_ssh_command(ssh_client, find_python_cmd)
+    python_path_stdout, _, _ = execute_ssh_command(ssh_config_host, find_python_cmd)
     python_cmd = python_path_stdout.strip() if python_path_stdout.strip() and python_path_stdout.strip() != "NOT_FOUND" else None
     
     if not python_cmd:
         # Try direct paths as fallback
         check_cmd = "for p in /usr/local/bin/python /usr/local/bin/python2 /usr/local/bin/python2.7 /usr/bin/python /usr/bin/python2 /usr/bin/python2.7 /opt/bin/python /opt/bin/python2; do if [ -x \"$p\" ] 2>/dev/null; then echo \"$p\"; break; fi; done"
-        python_path_stdout, _, _ = execute_ssh_command(ssh_client, check_cmd)
+        python_path_stdout, _, _ = execute_ssh_command(ssh_config_host, check_cmd)
         python_cmd = python_path_stdout.strip() if python_path_stdout.strip() else None
     
     if not python_cmd:
         raise Exception("Python 2.7 is required but not found on the remote system.")
     
     cmd = "echo '{0}' | base64 -d 2>/dev/null | {1} 2>&1".format(script_b64, python_cmd)
-    stdout, stderr, exit_code = execute_ssh_command(ssh_client, cmd)
+    stdout, stderr, exit_code = execute_ssh_command(ssh_config_host, cmd)
     
     if stdout.strip():
         for line in stdout.strip().split('\n'):
@@ -1279,7 +1253,7 @@ for r in results:
                 continue
     
     # 2. Scan for bad encoding (non-UTF-8 filenames)
-    bad_encoding_list = scan_bad_encoding_filenames_remote(ssh_client, share_path, exclude_patterns)
+    bad_encoding_list = scan_bad_encoding_filenames_remote(ssh_config_host, share_path, exclude_patterns)
     
     # Merge the two lists, avoiding duplicates by inode
     existing_inodes = {(dir_name, inode) for dir_name, inode, _, _ in rename_list}
@@ -1462,7 +1436,7 @@ def main():
         parser = argparse.ArgumentParser(
             description="Tool to organize media files (local mode) or generate cleanup scripts for QNAP (remote mode).",
             epilog="Local mode example: python main.py /path/to/photos --rename --debug\n"
-                   "Remote mode example: python main.py --remote-mode --ssh-host qnap.local --ssh-user admin --ssh-key ~/.ssh/qnap_key --share-path /share/Jinhwa/ --share-owner jinhwa --cleanup-all"
+                   "Remote mode example: python main.py --remote-mode --ssh-config-host qnap --share-path /share/Jinhwa/ --share-owner jinhwa --cleanup-all"
         )
         
         # Mode selection
@@ -1480,10 +1454,7 @@ def main():
         parser.add_argument("--force-overwrite", action="store_true", help="Force overwrite existing timestamp prefixes in filenames (local mode only).")
         
         # Remote mode arguments
-        parser.add_argument("--ssh-host", help="QNAP hostname or IP address (remote mode required).")
-        parser.add_argument("--ssh-user", help="SSH username (remote mode required).")
-        parser.add_argument("--ssh-key", help="Path to SSH private key file (remote mode required).")
-        parser.add_argument("--ssh-port", type=int, default=22, help="SSH port (default: 22).")
+        parser.add_argument("--ssh-config-host", help="SSH config host alias from ~/.ssh/config (remote mode required).")
         parser.add_argument("--share-path", help="Path to the share root on QNAP (e.g., /share/Jinhwa/) (remote mode required).")
         parser.add_argument("--share-owner", help="Username of the share owner (e.g., jinhwa) (remote mode required).")
         parser.add_argument("--cleanup-all", action="store_true", help="Enable all cleanup scans (permissions, empty folders, legacy files, filename fixes).")
@@ -1502,11 +1473,11 @@ def main():
             # Remote SSH mode
             # Debug mode doesn't require share-owner
             if args.debug_filename_bytes is None:
-                if not args.ssh_host or not args.ssh_user or not args.ssh_key or not args.share_path or not args.share_owner:
-                    parser.error("Remote mode requires: --ssh-host, --ssh-user, --ssh-key, --share-path, and --share-owner")
+                if not args.ssh_config_host or not args.share_path or not args.share_owner:
+                    parser.error("Remote mode requires: --ssh-config-host, --share-path, and --share-owner")
             else:
-                if not args.ssh_host or not args.ssh_user or not args.ssh_key or not args.share_path:
-                    parser.error("Debug mode requires: --ssh-host, --ssh-user, --ssh-key, and --share-path")
+                if not args.ssh_config_host or not args.share_path:
+                    parser.error("Debug mode requires: --ssh-config-host and --share-path")
             
             # Determine which cleanup operations to perform (skip if in debug mode)
             if args.debug_filename_bytes is None:
@@ -1525,16 +1496,12 @@ def main():
             
             exclude_patterns = [p.strip() for p in args.exclude_folder.split(',')] if args.debug_filename_bytes is None else []
             
-            print(f"Connecting to {args.ssh_host}...")
-            ssh_client = connect_ssh(args.ssh_host, args.ssh_user, args.ssh_key, args.ssh_port)
-            print("Connected successfully.\n")
-            
             try:
                 # Debug mode: export filename bytes for analysis
                 if args.debug_filename_bytes is not None:
                     print("=== Debug: Analyzing filename bytes ===\n")
                     sample_path = args.debug_filename_bytes if args.debug_filename_bytes else None
-                    output = debug_filename_bytes_remote(ssh_client, args.share_path, sample_path)
+                    output = debug_filename_bytes_remote(args.ssh_config_host, args.share_path, sample_path)
                     print(output)
                     return
                 
@@ -1545,23 +1512,23 @@ def main():
                 
                 if do_permissions:
                     print("Scanning for permission issues...")
-                    permission_issues = scan_permission_issues(ssh_client, args.share_path, args.share_owner)
+                    permission_issues = scan_permission_issues(args.ssh_config_host, args.share_path, args.share_owner)
                     print(f"Found {len(permission_issues['wrong_owner_files'])} files and {len(permission_issues['wrong_owner_dirs'])} directories with wrong ownership.\n")
                 
                 if do_filenames:
                     print("Scanning for problematic filenames (illegal characters and bad encoding)...")
-                    problematic_filenames = scan_problematic_filenames_remote(ssh_client, args.share_path, exclude_patterns)
+                    problematic_filenames = scan_problematic_filenames_remote(args.ssh_config_host, args.share_path, exclude_patterns)
                     print(f"Found {len(problematic_filenames)} files/directories with problematic characters or bad encoding.\n")
                 
                 if do_legacy_files:
                     print("Scanning for legacy files...")
-                    legacy_files = scan_legacy_files_remote(ssh_client, args.share_path)
+                    legacy_files = scan_legacy_files_remote(args.ssh_config_host, args.share_path)
                     total_legacy = len(legacy_files.get('files', [])) + len(legacy_files.get('directories', [])) + len(legacy_files.get('resource_forks', []))
                     print(f"Found {total_legacy} legacy items to delete ({len(legacy_files.get('files', []))} files, {len(legacy_files.get('directories', []))} directories, {len(legacy_files.get('resource_forks', []))} resource forks).\n")
                 
                 if do_empty_folders:
                     print("Scanning for empty folders...")
-                    empty_folders = scan_empty_folders_remote(ssh_client, args.share_path, exclude_patterns)
+                    empty_folders = scan_empty_folders_remote(args.ssh_config_host, args.share_path, exclude_patterns)
                     print(f"Found {len(empty_folders)} empty folders.\n")
                 
                 print("Generating cleanup scripts...")
@@ -1574,7 +1541,7 @@ def main():
                     problematic_filenames=problematic_filenames,
                     exclude_patterns=exclude_patterns,
                     output_dir=args.output_dir,
-                    ssh_client=ssh_client
+                    ssh_client=None
                 )
                 
                 if output_dir is None:
@@ -1588,8 +1555,8 @@ def main():
                         print(f"  - {os.path.basename(script)}")
                     print(f"\nReview the scripts and run them one by one on your QNAP SSH terminal.")
                 
-            finally:
-                disconnect_ssh(ssh_client)
+            except Exception as e:
+                raise
         else:
             # Local mode
             if not args.folder_path:

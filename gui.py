@@ -37,7 +37,7 @@ def log_error_to_file(error_message: str):
 try:
     from main import (
         rename_media, process_duplicate_files, flatten_directory,
-        connect_ssh, disconnect_ssh, scan_permission_issues, scan_empty_folders_remote,
+        scan_permission_issues, scan_empty_folders_remote,
         scan_legacy_files_remote, scan_problematic_filenames_remote,
         generate_categorized_cleanup_scripts
     )
@@ -147,36 +147,21 @@ class App(tk.Tk):
         # --- Remote Mode: SSH Connection ---
         self.ssh_frame = ttk.LabelFrame(self, text="SSH Connection", padding="10")
         
-        ttk.Label(self.ssh_frame, text="Host/IP:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
-        self.ssh_host_var = tk.StringVar()
-        self.ssh_host_entry = ttk.Entry(self.ssh_frame, textvariable=self.ssh_host_var, width=40)
-        self.ssh_host_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=5)
+        ttk.Label(self.ssh_frame, text="SSH Config Host:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        self.ssh_config_host_var = tk.StringVar()
+        self.ssh_config_host_entry = ttk.Entry(self.ssh_frame, textvariable=self.ssh_config_host_var, width=40)
+        self.ssh_config_host_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=5)
+        ttk.Label(self.ssh_frame, text="(Host alias from ~/.ssh/config)").grid(row=0, column=2, sticky=tk.W, padx=5)
         
-        ttk.Label(self.ssh_frame, text="SSH Username:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
-        self.ssh_user_var = tk.StringVar()
-        self.ssh_user_entry = ttk.Entry(self.ssh_frame, textvariable=self.ssh_user_var, width=40)
-        self.ssh_user_entry.grid(row=1, column=1, sticky=(tk.W, tk.E), padx=5)
-        
-        ttk.Label(self.ssh_frame, text="SSH Key File:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
-        self.ssh_key_var = tk.StringVar()
-        self.ssh_key_entry = ttk.Entry(self.ssh_frame, textvariable=self.ssh_key_var, width=40)
-        self.ssh_key_entry.grid(row=2, column=1, sticky=(tk.W, tk.E), padx=5)
-        ttk.Button(self.ssh_frame, text="Browse...", command=self.browse_ssh_key).grid(row=2, column=2, sticky=tk.W, padx=5)
-        
-        ttk.Label(self.ssh_frame, text="SSH Port:").grid(row=3, column=0, sticky=tk.W, padx=5, pady=5)
-        self.ssh_port_var = tk.StringVar(value="22")
-        self.ssh_port_entry = ttk.Entry(self.ssh_frame, textvariable=self.ssh_port_var, width=10)
-        self.ssh_port_entry.grid(row=3, column=1, sticky=tk.W, padx=5)
-        
-        ttk.Label(self.ssh_frame, text="Share Path:").grid(row=4, column=0, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(self.ssh_frame, text="Share Path:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
         self.share_path_var = tk.StringVar()
         self.share_path_entry = ttk.Entry(self.ssh_frame, textvariable=self.share_path_var, width=40)
-        self.share_path_entry.grid(row=4, column=1, sticky=(tk.W, tk.E), padx=5)
+        self.share_path_entry.grid(row=1, column=1, sticky=(tk.W, tk.E), padx=5)
         
-        ttk.Label(self.ssh_frame, text="Share Owner:").grid(row=5, column=0, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(self.ssh_frame, text="Share Owner:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
         self.share_owner_var = tk.StringVar()
         self.share_owner_entry = ttk.Entry(self.ssh_frame, textvariable=self.share_owner_var, width=40)
-        self.share_owner_entry.grid(row=5, column=1, sticky=(tk.W, tk.E), padx=5)
+        self.share_owner_entry.grid(row=2, column=1, sticky=(tk.W, tk.E), padx=5)
         
         self.ssh_frame.grid_columnconfigure(1, weight=1)
 
@@ -257,18 +242,6 @@ class App(tk.Tk):
         if folder_selected:
             self.folder_path_var.set(os.path.abspath(folder_selected))
     
-    def browse_ssh_key(self):
-        initial_file = self.ssh_key_var.get()
-        if not initial_file or not os.path.exists(initial_file):
-            initial_file = os.path.expanduser("~/.ssh")
-        
-        key_selected = filedialog.askopenfilename(
-            initialdir=initial_file,
-            title="Select SSH Private Key",
-            filetypes=[("All Files", "*.*")]
-        )
-        if key_selected:
-            self.ssh_key_var.set(key_selected)
 
     def load_window_geometry(self):
         """Loads the window geometry from the config file."""
@@ -303,14 +276,8 @@ class App(tk.Tk):
                     if last_timezone:
                         self.timezone_var.set(last_timezone)
                     
-                    if config.get("ssh_host"):
-                        self.ssh_host_var.set(config["ssh_host"])
-                    if config.get("ssh_user"):
-                        self.ssh_user_var.set(config["ssh_user"])
-                    if config.get("ssh_key"):
-                        self.ssh_key_var.set(config["ssh_key"])
-                    if config.get("ssh_port"):
-                        self.ssh_port_var.set(config["ssh_port"])
+                    if config.get("ssh_config_host"):
+                        self.ssh_config_host_var.set(config["ssh_config_host"])
                     if config.get("share_path"):
                         self.share_path_var.set(config["share_path"])
                     if config.get("share_owner"):
@@ -325,10 +292,7 @@ class App(tk.Tk):
             "mode": self.mode_var.get(),
             "last_folder_path": self.folder_path_var.get(),
             "last_timezone": self.timezone_var.get(),
-            "ssh_host": self.ssh_host_var.get(),
-            "ssh_user": self.ssh_user_var.get(),
-            "ssh_key": self.ssh_key_var.get(),
-            "ssh_port": self.ssh_port_var.get(),
+            "ssh_config_host": self.ssh_config_host_var.get(),
             "share_path": self.share_path_var.get(),
             "share_owner": self.share_owner_var.get(),
             "window_geometry": self.geometry(),
@@ -379,10 +343,7 @@ class App(tk.Tk):
         else:
             # Remote mode
             parts.append("--remote-mode")
-            if self.ssh_host_var.get(): parts.append(f'--ssh-host "{self.ssh_host_var.get()}"')
-            if self.ssh_user_var.get(): parts.append(f'--ssh-user "{self.ssh_user_var.get()}"')
-            if self.ssh_key_var.get(): parts.append(f'--ssh-key "{self.ssh_key_var.get()}"')
-            if self.ssh_port_var.get() != "22": parts.append(f'--ssh-port {self.ssh_port_var.get()}')
+            if self.ssh_config_host_var.get(): parts.append(f'--ssh-config-host "{self.ssh_config_host_var.get()}"')
             if self.share_path_var.get(): parts.append(f'--share-path "{self.share_path_var.get()}"')
             if self.share_owner_var.get(): parts.append(f'--share-owner "{self.share_owner_var.get()}"')
             
@@ -413,14 +374,11 @@ class App(tk.Tk):
                 return
         else:
             # Remote mode validation
-            if not self.ssh_host_var.get() or not self.ssh_user_var.get() or not self.ssh_key_var.get():
-                messagebox.showerror("Error", "Please provide SSH host, username, and key file.")
+            if not self.ssh_config_host_var.get():
+                messagebox.showerror("Error", "Please provide SSH config host alias.")
                 return
             if not self.share_path_var.get() or not self.share_owner_var.get():
                 messagebox.showerror("Error", "Please provide share path and share owner.")
-                return
-            if not os.path.exists(self.ssh_key_var.get()):
-                messagebox.showerror("Error", f"SSH key file not found: {self.ssh_key_var.get()}")
                 return
             if not (self.cleanup_permissions_var.get() or self.cleanup_empty_folders_var.get() or 
                     self.cleanup_legacy_files_var.get() or self.cleanup_filenames_var.get()):
@@ -452,10 +410,7 @@ class App(tk.Tk):
         else:
             params = {
                 "mode": "remote",
-                "ssh_host": self.ssh_host_var.get(),
-                "ssh_user": self.ssh_user_var.get(),
-                "ssh_key": self.ssh_key_var.get(),
-                "ssh_port": int(self.ssh_port_var.get() or "22"),
+                "ssh_config_host": self.ssh_config_host_var.get(),
                 "share_path": self.share_path_var.get(),
                 "share_owner": self.share_owner_var.get(),
                 "cleanup_permissions": self.cleanup_permissions_var.get(),
@@ -503,69 +458,56 @@ class App(tk.Tk):
             else:
                 # Remote mode
                 self.queue.put("--- Starting remote SSH mode tasks ---\n")
-                ssh_client = None
-                try:
-                    self.queue.put(f"Connecting to {params['ssh_host']}...\n")
-                    ssh_client = connect_ssh(
-                        params["ssh_host"],
-                        params["ssh_user"],
-                        params["ssh_key"],
-                        params["ssh_port"]
+                
+                permission_issues = None
+                empty_folders = None
+                legacy_files = None
+                problematic_filenames = None
+                
+                if params["cleanup_permissions"]:
+                    self.queue.put("Scanning for permission issues...\n")
+                    permission_issues = scan_permission_issues(params["ssh_config_host"], params["share_path"], params["share_owner"])
+                    self.queue.put(f"Found {len(permission_issues['wrong_owner_files'])} files and {len(permission_issues['wrong_owner_dirs'])} directories with wrong ownership.\n\n")
+                
+                if params["cleanup_filenames"]:
+                    self.queue.put("Scanning for problematic filenames (illegal characters and bad encoding)...\n")
+                    problematic_filenames = scan_problematic_filenames_remote(
+                        params["ssh_config_host"], params["share_path"], params["exclude_folder"]
                     )
-                    self.queue.put("Connected successfully.\n\n")
-                    
-                    permission_issues = None
-                    empty_folders = None
-                    legacy_files = None
-                    problematic_filenames = None
-                    
-                    if params["cleanup_permissions"]:
-                        self.queue.put("Scanning for permission issues...\n")
-                        permission_issues = scan_permission_issues(ssh_client, params["share_path"], params["share_owner"])
-                        self.queue.put(f"Found {len(permission_issues['wrong_owner_files'])} files and {len(permission_issues['wrong_owner_dirs'])} directories with wrong ownership.\n\n")
-                    
-                    if params["cleanup_filenames"]:
-                        self.queue.put("Scanning for problematic filenames (illegal characters and bad encoding)...\n")
-                        problematic_filenames = scan_problematic_filenames_remote(
-                            ssh_client, params["share_path"], params["exclude_folder"]
-                        )
-                        self.queue.put(f"Found {len(problematic_filenames)} files/directories with problematic characters or bad encoding.\n\n")
-                    
-                    if params["cleanup_legacy_files"]:
-                        self.queue.put("Scanning for legacy files...\n")
-                        legacy_files = scan_legacy_files_remote(ssh_client, params["share_path"])
-                        total_legacy = len(legacy_files.get('files', [])) + len(legacy_files.get('directories', [])) + len(legacy_files.get('resource_forks', []))
-                        self.queue.put(f"Found {total_legacy} legacy items to delete.\n\n")
-                    
-                    if params["cleanup_empty_folders"]:
-                        self.queue.put("Scanning for empty folders...\n")
-                        empty_folders = scan_empty_folders_remote(ssh_client, params["share_path"], params["exclude_folder"])
-                        self.queue.put(f"Found {len(empty_folders)} empty folders.\n\n")
-                    
-                    self.queue.put("Generating cleanup scripts...\n")
-                    output_dir, scripts = generate_categorized_cleanup_scripts(
-                        share_path=params["share_path"],
-                        username=params["share_owner"],
-                        permission_issues=permission_issues,
-                        empty_folders=empty_folders,
-                        legacy_files=legacy_files,
-                        problematic_filenames=problematic_filenames,
-                        exclude_patterns=params["exclude_folder"]
-                    )
-                    
-                    if output_dir is None:
-                        self.queue.put(f"\n=== No scripts generated ===\n")
-                        self.queue.put("No issues found that require cleanup scripts.\n")
-                    else:
-                        self.queue.put(f"\n=== Scripts generated successfully ===\n")
-                        self.queue.put(f"Output directory: {os.path.abspath(output_dir)}\n")
-                        self.queue.put(f"Scripts generated: {len(scripts)}\n")
-                        for script in scripts:
-                            self.queue.put(f"  - {os.path.basename(script)}\n")
-                        self.queue.put(f"\nReview the scripts and run them on your QNAP SSH terminal.\n")
-                finally:
-                    if ssh_client:
-                        disconnect_ssh(ssh_client)
+                    self.queue.put(f"Found {len(problematic_filenames)} files/directories with problematic characters or bad encoding.\n\n")
+                
+                if params["cleanup_legacy_files"]:
+                    self.queue.put("Scanning for legacy files...\n")
+                    legacy_files = scan_legacy_files_remote(params["ssh_config_host"], params["share_path"])
+                    total_legacy = len(legacy_files.get('files', [])) + len(legacy_files.get('directories', [])) + len(legacy_files.get('resource_forks', []))
+                    self.queue.put(f"Found {total_legacy} legacy items to delete.\n\n")
+                
+                if params["cleanup_empty_folders"]:
+                    self.queue.put("Scanning for empty folders...\n")
+                    empty_folders = scan_empty_folders_remote(params["ssh_config_host"], params["share_path"], params["exclude_folder"])
+                    self.queue.put(f"Found {len(empty_folders)} empty folders.\n\n")
+                
+                self.queue.put("Generating cleanup scripts...\n")
+                output_dir, scripts = generate_categorized_cleanup_scripts(
+                    share_path=params["share_path"],
+                    username=params["share_owner"],
+                    permission_issues=permission_issues,
+                    empty_folders=empty_folders,
+                    legacy_files=legacy_files,
+                    problematic_filenames=problematic_filenames,
+                    exclude_patterns=params["exclude_folder"]
+                )
+                
+                if output_dir is None:
+                    self.queue.put(f"\n=== No scripts generated ===\n")
+                    self.queue.put("No issues found that require cleanup scripts.\n")
+                else:
+                    self.queue.put(f"\n=== Scripts generated successfully ===\n")
+                    self.queue.put(f"Output directory: {os.path.abspath(output_dir)}\n")
+                    self.queue.put(f"Scripts generated: {len(scripts)}\n")
+                    for script in scripts:
+                        self.queue.put(f"  - {os.path.basename(script)}\n")
+                    self.queue.put(f"\nReview the scripts and run them on your QNAP SSH terminal.\n")
                 
         except Exception as e:
             self.queue.put(f"\n--- AN ERROR OCCURRED ---\n{e}\n")
